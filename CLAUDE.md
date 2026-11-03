@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Recompilação estática de **Digimon Rumble Arena 2** (PS2 NTSC-U, `SLUS-21067`, VER 1.02) para um executável nativo. O alvo por enquanto é só Linux. O código MIPS R5900 do Emotion Engine vira C++, que é ligado a um runtime que substitui o hardware do PS2 (GS, VU1, IOP, SPU2). A documentação e os commits são em português.
 
-Estado atual: análise e preparação. Ainda não há código de runtime nem build. A base do recompilador (PS2Recomp ou ps2n) ainda não foi escolhida; veja `docs/ferramentas.md`.
+Estado atual: análise e preparação. Base atual: PS2Recomp (ran-j), já recompilando o ELF inteiro sem instruções não tratadas. O ps2n continua como alternativa; veja `docs/ferramentas.md`.
 
 ## Regra: pesquisar na internet ao encontrar problemas
 
@@ -28,6 +28,8 @@ ISO, ELF, IRX, `.RES`, conteúdo extraído, savestates, projetos Ghidra e **cód
 - `ghidra/DRA2`: projeto da GUI do usuário. Fica travado enquanto a GUI está aberta, então **não use em headless**.
 - `ghidra/headless/DRA2_headless`: projeto separado, usado pelo script de export.
 - `ghidra/export/`: `SLUS_210.67.toml` (config do PS2Recomp) e `SLUS_210.67.csv` (function map).
+- `external/PS2Recomp/`: clone do upstream (GPL-3.0) com build em `out/build`.
+- `generated/`: saída do `ps2_recomp` (cerca de 78k `.cpp`, 552 MB), ligada por symlink em `external/PS2Recomp/ps2xRuntime/src/runner/`.
 
 ## Comandos
 
@@ -36,6 +38,19 @@ ISO, ELF, IRX, `.RES`, conteúdo extraído, savestates, projetos Ghidra e **cód
 tools/ghidra_export.sh
 
 # Para reanalisar do zero, apague ghidra/headless/ antes
+
+# PS2Recomp (clonado em external/PS2Recomp, fora do git). GCC/Linux precisa de -march=x86-64-v3 (issue upstream #261)
+cmake -S external/PS2Recomp -B external/PS2Recomp/out/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF \
+  -DCMAKE_C_FLAGS=-march=x86-64-v3 -DCMAKE_CXX_FLAGS=-march=x86-64-v3
+cmake --build external/PS2Recomp/out/build --target ps2_recomp
+
+# Recompilar: ghidra/export/recomp.toml = TOML exportado com output -> generated/
+external/PS2Recomp/out/build/ps2xRecomp/ps2_recomp ghidra/export/recomp.toml
+
+# Ligar generated/ no runtime (symlinks) e compilar o executável. Use -j3: a máquina tem só 7 GB de RAM
+tools/stage_runner.sh
+cmake --build external/PS2Recomp/out/build --target ps2EntryRunner -j3
 ```
 
 Detalhes do export: o `ExportPS2Functions.java` (de `ran-j/PS2Recomp`) fica em `~/ghidra_scripts/`. No modo headless, cada `askFile()` consome um argumento do script, em ordem (TOML, depois CSV). O `.properties` não funcionou, porque o Ghidra prioriza a cópia em `~/ghidra_scripts`.

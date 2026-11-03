@@ -76,3 +76,6 @@ compile_commands.json
 .idea/
 *.swp
 .DS_Store
+
+# Ferramentas externas clonadas (PS2Recomp, ps2n...)
+/external/
