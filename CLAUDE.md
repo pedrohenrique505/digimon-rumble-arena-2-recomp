@@ -40,7 +40,11 @@ tools/ghidra_export.sh
 # Para reanalisar do zero, apague ghidra/headless/ antes
 
 # PS2Recomp (clonado em external/PS2Recomp, fora do git). GCC/Linux precisa de -march=x86-64-v3 (issue upstream #261)
-cmake -S external/PS2Recomp -B external/PS2Recomp/out/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+# Build de desenvolvimento: RelWithDebInfo sem -g. O upstream liga o LTO só no tipo Release
+# (ReleaseMode.cmake), e o link com LTO de 78k funções leva de 20 a 40 min e estoura a RAM. mold linka em segundos.
+cmake -S external/PS2Recomp -B external/PS2Recomp/out/build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O2 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -DNDEBUG" \
+  -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold \
   -DPS2X_BUILD_STUDIO=OFF -DPS2X_BUILD_TEST=OFF \
   -DCMAKE_C_FLAGS=-march=x86-64-v3 -DCMAKE_CXX_FLAGS=-march=x86-64-v3
 cmake --build external/PS2Recomp/out/build --target ps2_recomp
@@ -48,9 +52,9 @@ cmake --build external/PS2Recomp/out/build --target ps2_recomp
 # Recompilar: ghidra/export/recomp.toml = TOML exportado com output -> generated/
 external/PS2Recomp/out/build/ps2xRecomp/ps2_recomp ghidra/export/recomp.toml
 
-# Ligar generated/ no runtime (symlinks) e compilar o executável. Use -j3: a máquina tem só 7 GB de RAM
+# Ligar generated/ no runtime (symlinks) e compilar o executável. -j5 cabe nos 7 GB de RAM (cerca de 350 MB por job)
 tools/stage_runner.sh
-cmake --build external/PS2Recomp/out/build --target ps2EntryRunner -j3
+cmake --build external/PS2Recomp/out/build --target ps2EntryRunner -j5
 ```
 
 Detalhes do export: o `ExportPS2Functions.java` (de `ran-j/PS2Recomp`) fica em `~/ghidra_scripts/`. No modo headless, cada `askFile()` consome um argumento do script, em ordem (TOML, depois CSV). O `.properties` não funcionou, porque o Ghidra prioriza a cópia em `~/ghidra_scripts`.
