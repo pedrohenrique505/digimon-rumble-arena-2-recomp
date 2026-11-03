@@ -1,0 +1,78 @@
+# =====================================================================
+# ARQUIVOS DO JOGO (copyright): NUNCA versionar
+# O usuário fornece a própria ISO. Nada extraído dela entra no repo.
+# =====================================================================
+
+# Imagens de disco
+*.iso
+*.ISO
+*.bin
+*.cue
+*.img
+*.IMG
+*.chd
+*.cso
+*.zso
+*.gz.iso
+
+# Executável e módulos do jogo
+SLUS_*
+SLES_*
+SLPS_*
+SCUS_*
+*.elf
+*.ELF
+*.irx
+*.IRX
+SYSTEM.CNF
+
+# Dados/recursos do jogo
+*.res
+*.RES
+FILEMAP.TXT
+
+# Pastas com conteúdo extraído da ISO
+/iso/
+/game/
+/extracted/
+/assets/
+/dump/
+
+# Código gerado pelo recompilador (derivado do código do jogo)
+/generated/
+/recomp_out/
+
+# PCSX2: savestates, memory cards, dumps de GS/VU
+*.p2s
+*.ps2
+*.mcd
+*.gs
+*.gs.xz
+*.gs.zst
+*.vutrace
+
+# =====================================================================
+# Ghidra (projeto local, contém o binário importado)
+# =====================================================================
+*.gpr
+*.rep/
+*.lock
+*.lock~
+/ghidra/
+
+# =====================================================================
+# Build / ferramentas
+# =====================================================================
+/build/
+/out/
+.cache/
+compile_commands.json
+*.o
+*.a
+*.so
+
+# Editor / SO
+.vscode/
+.idea/
+*.swp
+.DS_Store
