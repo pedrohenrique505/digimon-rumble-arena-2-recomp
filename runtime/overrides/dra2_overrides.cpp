@@ -9,6 +9,7 @@
 #include "runtime/ps2_memory.h"
 
 #include <cstdio>
+#include <iterator>
 
 namespace
 {
@@ -41,8 +42,30 @@ namespace
         ctx->pc = getRegU32(ctx, 31);
     }
 
+    struct SdkBinding
+    {
+        uint32_t address;
+        const char *handler;
+    };
+
+    // Funções do SDK da Sony identificadas pelo ps2_analyzer, ligadas aos handlers HLE
+    // do runtime. Gerado por tools/gen_sdk_bindings.py.
+    constexpr SdkBinding kSdkBindings[] = {
+#include "dra2_sdk_bindings.inc"
+    };
+
     void apply(PS2Runtime &runtime)
     {
+        size_t bound = 0;
+        for (const SdkBinding &b : kSdkBindings)
+        {
+            if (ps2_game_overrides::bindAddressHandler(runtime, b.address, b.handler))
+            {
+                ++bound;
+            }
+        }
+        std::fprintf(stderr, "[dra2] %zu/%zu SDK bindings aplicados\n", bound, std::size(kSdkBindings));
+
         runtime.registerFunction(0x00408B68u, ttyWrite);
     }
 }
