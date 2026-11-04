@@ -8,12 +8,26 @@ O código MIPS R5900 do Emotion Engine é traduzido para C++ e ligado a um runti
 
 ## Estado
 
-Início do projeto: pesquisa e análise do binário. Veja [`progression/`](progression/) para o diário de progresso.
+**Boot inicial.** O ELF inteiro recompila com o [PS2Recomp](https://github.com/ran-j/ps2recomp): 78.202 funções, 0 instruções não tratadas. O executável já começa a rodar, passa do travamento da TTY de debug (DECI2) e imprime as primeiras mensagens do jogo. O próximo passo é ligar as funções do SDK da Sony aos handlers HLE do runtime, a começar pela inicialização do SIF/IOP.
+
+Veja [`progression/`](progression/) para o diário de progresso.
 
 ## Estrutura
 
 - `docs/`: pesquisa e documentação técnica ([ferramentas](docs/ferramentas.md))
 - `progression/`: registro do progresso do projeto, por data
+- `runtime/overrides/`: correções específicas do jogo (game overrides do PS2Recomp)
+- `tools/`: scripts de export do Ghidra e geração dos bindings do SDK
+- `CMakeLists.txt`: build do executável (runtime do PS2Recomp + código gerado + overrides)
+
+## Build (Linux)
+
+Os passos completos estão no [`CLAUDE.md`](CLAUDE.md#comandos). Em resumo:
+
+1. Extraia o disco para `game/` (a ISO não fica no repositório).
+2. Exporte a function map do Ghidra (`tools/ghidra_export.sh`) e recompile com o `ps2_recomp`, gerando `generated/`.
+3. Rode o `ps2_analyzer` e o `tools/gen_sdk_bindings.py`.
+4. `cmake -S . -B build -G Ninja ...` e `cmake --build build --target dra2`.
 
 ## Ferramentas
 
