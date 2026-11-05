@@ -1,0 +1,28 @@
+From 82767a7fff335c5920aa7b1c1194c9579d8662ce Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Thu, 5 Nov 2026 19:34:49 -0300
+Subject: [PATCH 5/5] ps2xRuntime: start with D_CTRL.DMAE set, as the kernel
+ leaves it
+
+---
+ ps2xRuntime/src/lib/ps2_memory.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+index 37b6a4d..62f51e1 100644
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -355,6 +355,10 @@ bool PS2Memory::initialize(size_t ramSize)
+ 
+         // Initialize I/O registers
+         m_ioRegisters.clear();
++        // The kernel leaves the DMAC enabled (D_CTRL.DMAE) before the ELF runs.
++        // Games that read-modify-write D_CTRL without setting DMAE themselves
++        // would otherwise turn the whole DMAC off.
++        m_ioRegisters[0x1000E000u] = 0x1u;
+ 
+         // Initialize GS registers
+         memset(&gs_regs, 0, sizeof(gs_regs));
+-- 
+2.56.0
+
