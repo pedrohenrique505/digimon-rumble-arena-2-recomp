@@ -74,6 +74,8 @@ add_executable(dra2
     ${DRA2_OVERRIDE_SOURCES}
 )
 target_link_libraries(dra2 PRIVATE ps2_runtime dra2_generated)
+# Headers internos do runtime usados pelos overrides (ex.: ps2_iop_transport.h)
+target_include_directories(dra2 PRIVATE "${RT_DIR}/src/lib")
 
 # A tabela de funções é um construtor com ~360k atribuições. Com -O2 o GCC leva
 # cerca de 28 min; -O0 basta, porque roda uma vez só, no boot.

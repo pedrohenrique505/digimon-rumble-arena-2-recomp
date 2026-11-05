@@ -1,0 +1,63 @@
+From e46f46c368dbdc69c99f42590e0e738b6060b364 Mon Sep 17 00:00:00 2001
+From: dra2 <dra2@local>
+Date: Wed, 4 Nov 2026 21:05:03 -0300
+Subject: [PATCH 4/4] ps2xRuntime: raise the GS interrupt for latched
+ SIGNAL/FINISH
+
+---
+ ps2xRuntime/include/runtime/ee_scheduler.h |  1 +
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp | 19 +++++++++++++++++++
+ 2 files changed, 20 insertions(+)
+
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index a60b20c..655ae33 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -387,6 +387,7 @@ private:
+     void processPendingEvents();
+     void processDueDeadlines();
+     void processEvent(const EeEvent &event);
++    void dispatchPendingGsIrq();
+     void finishEventWaiters(EeEventFlag &flag, bool interruptSafe);
+     [[nodiscard]] static bool eventCondition(uint32_t current, uint32_t requested, uint32_t mode);
+     static int waitObjectId(const EeWaitState &wait);
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index c5e31c4..24150bf 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1287,6 +1287,24 @@ void EeScheduler::dispatchIrq(bool dmac, uint32_t cause)
+     }
+ }
+ 
++// GS interrupt (INTC cause 0). The GS frontend latches SIGNAL/FINISH in CSR bits
++// 0/1 but nothing raised the interrupt, so games that close each frame with a
++// FINISH primitive and wait for their GS handler to acknowledge it (CSR write-1-
++// to-clear) stalled. Delivered at VBlank start; IMR bits 8/9 (SIGMSK/FINISHMSK)
++// mask the sources.
++void EeScheduler::dispatchPendingGsIrq()
++{
++    GSRegisters &gs = m_runtime.memory().gs();
++    const uint64_t csr = gs.csr.load(std::memory_order_acquire);
++    const uint64_t imr = gs.imr;
++    const bool signal = (csr & 0x1ull) != 0u && (imr & 0x100ull) == 0u;
++    const bool finish = (csr & 0x2ull) != 0u && (imr & 0x200ull) == 0u;
++    if (signal || finish)
++    {
++        dispatchIrq(false, 0u);
++    }
++}
++
+ void EeScheduler::setVSyncFlag(uint32_t flagAddress, uint32_t tickAddress)
+ {
+     assertExecutor();
+@@ -1901,6 +1919,7 @@ void EeScheduler::processEvent(const EeEvent &event)
+             queueInvocation(std::move(invocation));
+         }
+         dispatchIrq(false, 2u);
++        dispatchPendingGsIrq();
+         break;
+     case EeEventType::ExternalWake:
+         completeExternalWait(event.id, event.value, KE_OK);
+-- 
+2.56.0
+

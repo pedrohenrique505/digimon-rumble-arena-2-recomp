@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Recompilação estática de **Digimon Rumble Arena 2** (PS2 NTSC-U, `SLUS-21067`, VER 1.02) para um executável nativo. O alvo por enquanto é só Linux. O código MIPS R5900 do Emotion Engine vira C++, que é ligado a um runtime que substitui o hardware do PS2 (GS, VU1, IOP, SPU2). A documentação e os commits são em português.
 
-Estado atual: análise e preparação. Base atual: PS2Recomp (ran-j), já recompilando o ELF inteiro sem instruções não tratadas. O ps2n continua como alternativa; veja `docs/ferramentas.md`.
+Estado atual: o jogo roda o laço principal (IOP emulado com os IRX do jogo, leitura do disco, DMA de render por frame). O bloqueio atual é o pipeline VIF1/VU1 → GS. Veja o `progression/` mais recente. Base: PS2Recomp (ran-j).
 
 ## Regra: pesquisar na internet ao encontrar problemas
 
@@ -56,14 +56,20 @@ external/PS2Recomp/out/build/ps2xRecomp/ps2_recomp ghidra/export/recomp.toml
 external/PS2Recomp/out/build/ps2xAnalyzer/ps2_analyzer game/SLUS_210.67 ghidra/analyzer/analyzer.toml
 python3 tools/gen_sdk_bindings.py
 
+# Patches nossos no clone do upstream (idempotente; rodar depois de clonar ou atualizar o PS2Recomp)
+tools/apply_upstream_patches.sh
+
 # Build do jogo (CMakeLists.txt da raiz): runtime do upstream como biblioteca + generated/ + overrides
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O2 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -DNDEBUG" \
   -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold
 cmake --build build --target dra2 -j5   # -j5 cabe nos 7 GB de RAM
 
-# Rodar (o cdRoot é o diretório do ELF, então game/ precisa do disco inteiro extraído)
-cd game && timeout -s INT 60 ../build/dra2 "$PWD/SLUS_210.67"
+# Rodar (o cdRoot é o diretório do ELF, então game/ precisa do disco inteiro extraído).
+# DRA2_ISO = ISO original: o IOP lê os setores reais (sem ela, usa um ISO virtual montado a partir de game/).
+cd game && DRA2_ISO="$HOME/Downloads/Digimon Rumble Arena 2 (USA)/Digimon Rumble Arena 2 (USA).iso" \
+  timeout -s INT 60 ../build/dra2 "$PWD/SLUS_210.67"
+# Diagnóstico: DRA2_TRACE_RPC=1 (cada sceSifCallRpc), DRA2_TRACE_GS=1 (CSR/IMR/flag do limitador, AddIntcHandler/EnableIntc)
 ```
 
 Detalhes do export: o `ExportPS2Functions.java` (de `ran-j/PS2Recomp`) fica em `~/ghidra_scripts/`. No modo headless, cada `askFile()` consome um argumento do script, em ordem (TOML, depois CSV). O `.properties` não funcionou, porque o Ghidra prioriza a cópia em `~/ghidra_scripts`.
@@ -79,8 +85,9 @@ Detalhes do export: o `ExportPS2Functions.java` (de `ran-j/PS2Recomp`) fica em `
 - `CMakeLists.txt` (raiz) inclui `ps2xIOP` e `ps2xRuntime` do upstream com `EXCLUDE_FROM_ALL` e define:
   - `dra2_generated`: biblioteca estática com o código gerado (unity build de 32, PCH, `-O2`);
   - `dra2`: executável com o `main.cpp` do upstream, o `generated/register_functions.cpp` (**`-O0`**: é um construtor com cerca de 360k atribuições, que leva 28 min em `-O2`) e `runtime/overrides/*.cpp`.
-- **Correções por jogo** ficam em `runtime/overrides/` (código nosso, versionado), usando a API `game_overrides.h`: só se aplicam se ELF, entry e CRC32 (`0xA6702034`) baterem. Os bindings de endereço para handler são feitos em runtime (`bindAddressHandler`/`registerFunction`), sem recompilar o código gerado. As chamadas `jal` geradas passam por `runtime->dispatchGuestBranch`, então a substituição pega.
-- Não modifique o clone do upstream. Se for preciso corrigir o runtime, prefira um override; em último caso, mande um PR para o upstream.
+- **Correções por jogo** ficam em `runtime/overrides/` (código nosso, versionado), usando a API `game_overrides.h`: só se aplicam se ELF, entry e CRC32 (`0xA6702034`) baterem. Os bindings de endereço para handler são feitos em runtime (`replaceFunction`), sem recompilar o código gerado. As chamadas `jal` geradas passam por `runtime->dispatchGuestBranch`, então a substituição pega.
+- **Convenção dos handlers:** `ctx->pc = $ra` **antes** de chamar qualquer HLE do runtime, como fazem os stubs gerados. HLEs que guardam o contexto para retomar depois (ex.: `sceSifCallRpc` com callback) entram em laço se o `pc` ainda apontar para a função. Por isso os bindings do SDK passam pelo `sdkTrampoline`, e não pelo `bindAddressHandler` do upstream.
+- Correção por jogo vai em override. Correção **genérica** do runtime/IOP que não cabe num override vira **patch** em `patches/ps2recomp/` (formato `git format-patch`, um por correção, aplicado pelo `tools/apply_upstream_patches.sh`). No clone há um branch local `dra2-patches` com um commit por patch: edite lá e regenere com `git format-patch -o patches/ps2recomp e563698..dra2-patches`. Cada patch é candidato a PR no upstream.
 
 ## Fatos do binário (para não redescobrir)
 

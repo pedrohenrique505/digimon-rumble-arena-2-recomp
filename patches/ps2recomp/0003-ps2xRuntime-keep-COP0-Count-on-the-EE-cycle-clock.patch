@@ -1,0 +1,45 @@
+From ecbf7a24f4a49529345e283c7290ddac7a25af83 Mon Sep 17 00:00:00 2001
+From: dra2 <dra2@local>
+Date: Wed, 4 Nov 2026 21:05:03 -0300
+Subject: [PATCH 3/4] ps2xRuntime: keep COP0 Count on the EE cycle clock
+
+---
+ ps2xRuntime/include/runtime/ee_scheduler.h | 2 ++
+ ps2xRuntime/src/lib/ps2_runtime.cpp        | 8 +++++++-
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index f247ff9..a60b20c 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -280,6 +280,8 @@ public:
+     void postEvent(EeEvent event);
+     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
+     void accountCycles(uint32_t cycles) noexcept;
++    // Current deterministic EE cycle (the clock VBlank, timers and alarms run on).
++    [[nodiscard]] uint64_t eeCycle() const noexcept { return m_eeCycle; }
+     [[nodiscard]] bool isExecutingGuest() const noexcept;
+ 
+     // Kernel object API. All calls except postEvent/requestStop execute on the
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 45cb9d2..d888a0a 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1356,7 +1356,13 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+     // Every inter-function transfer is also a deterministic EE safe point.
+     // Backward edges inside generated functions use eeCheckpointDue(), while
+     // this charge bounds straight-line call chains that have no local loop.
+-    if (m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles))
++    const bool checkpoint = m_eeScheduler && m_eeScheduler->checkpointDue(EeScheduler::kGuestDispatchCycles);
++    // COP0 Count ticks at the EE clock. Generated MFC0 reads ctx->cop0_count, so keep
++    // it on the same deterministic clock as VBlank/timers; otherwise games that pace
++    // frames by polling Count never see time advance.
++    if (m_eeScheduler)
++        ctx->cop0_count = static_cast<uint32_t>(m_eeScheduler->eeCycle());
++    if (checkpoint)
+     {
+         return false;
+     }
+-- 
+2.56.0
+

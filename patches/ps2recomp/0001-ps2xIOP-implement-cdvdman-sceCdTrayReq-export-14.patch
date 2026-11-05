@@ -1,0 +1,32 @@
+From a17ec226bb3e3d5b8db53e778c02f33ab50b105c Mon Sep 17 00:00:00 2001
+From: dra2 <dra2@local>
+Date: Wed, 4 Nov 2026 21:05:03 -0300
+Subject: [PATCH 1/4] ps2xIOP: implement cdvdman sceCdTrayReq (export 14)
+
+---
+ ps2xIOP/src/emulator/imports/iop_cdvd.cpp | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
+index ad58fb4..580df98 100644
+--- a/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
++++ b/ps2xIOP/src/emulator/imports/iop_cdvd.cpp
+@@ -280,6 +280,15 @@ namespace ps2x::iop::detail
+                 cpu.gpr[2] = kCdvdReadyComplete;
+                 return true;
+ 
++            case 14: // sceCdTrayReq(param, u32 *traychk)
++                // SCECdTrayCheck (2) reports whether the medium changed since the
++                // last check; the emulated disc never changes. Open/close succeed.
++                if (a0 == 2u && a1 != 0u)
++                    memory.write32(a1, 0u);
++                lastError = kCdvdErrorNone;
++                cpu.gpr[2] = 1u;
++                return true;
++
+             case 28: // sceCdStatus
+                 cpu.gpr[2] = kCdvdStatusPause;
+                 return true;
+-- 
+2.56.0
+
