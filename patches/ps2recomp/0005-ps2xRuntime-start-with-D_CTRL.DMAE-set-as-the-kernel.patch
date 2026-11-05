@@ -1,7 +1,7 @@
 From 82767a7fff335c5920aa7b1c1194c9579d8662ce Mon Sep 17 00:00:00 2001
 From: Pedro Henrique <pedro88rising@gmail.com>
 Date: Thu, 5 Nov 2026 19:34:49 -0300
-Subject: [PATCH 5/5] ps2xRuntime: start with D_CTRL.DMAE set, as the kernel
+Subject: [PATCH 5/7] ps2xRuntime: start with D_CTRL.DMAE set, as the kernel
  leaves it
 
 ---

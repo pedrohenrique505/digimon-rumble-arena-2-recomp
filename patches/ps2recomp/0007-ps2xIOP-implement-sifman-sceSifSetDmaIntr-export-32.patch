@@ -1,0 +1,57 @@
+From 2e9ef0af72be81bb0bd3d05cbafbb58252ecbf60 Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Thu, 5 Nov 2026 20:08:39 -0300
+Subject: [PATCH 7/7] ps2xIOP: implement sifman sceSifSetDmaIntr (export 32)
+
+It fell to the default case and returned 0, which callers read as "DMA
+queue full" and retry forever. Do the same transfer as sceSifSetDma and
+schedule the completion callback(userdata) like the SIF DMA interrupt.
+---
+ ps2xIOP/src/emulator/iop_emulator.cpp     | 17 ++++++++++++++---
+ ps2xIOP/src/emulator/services/iop_rpc.cpp |  2 ++
+ 2 files changed, 16 insertions(+), 3 deletions(-)
+
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+index e5f63a9..a28a7da 100644
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -318,9 +318,20 @@ namespace ps2x::iop::detail
+                 return ImportDisposition::Handled;
+             if (iequals(call.library, "sifman"))
+             {
+-                return rpc.dispatchSifManImport(call.ordinal, cpu)
+-                           ? ImportDisposition::Handled
+-                           : ImportDisposition::Missing;
++                const uint32_t completion = cpu.gpr[6];
++                const uint32_t completionArg = cpu.gpr[7];
++                const uint32_t callerGp = cpu.gpr[28];
++                if (!rpc.dispatchSifManImport(call.ordinal, cpu))
++                    return ImportDisposition::Missing;
++                // sceSifSetDmaIntr: the copy is already done; run the completion
++                // callback the way the SIF DMA interrupt would.
++                if (call.ordinal == 32u && cpu.gpr[2] != 0u && completion != 0u)
++                {
++                    pendingGuestCallbacks.emplace(
++                        totalCycles + kCdvdCompletionCycles,
++                        ScheduledGuestCallback{completion, callerGp, completionArg});
++                }
++                return ImportDisposition::Handled;
+             }
+             if (iequals(call.library, "vblank") && vblank.dispatchImport(call.ordinal, cpu, totalCycles))
+                 return ImportDisposition::Handled;
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.cpp b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+index 62c8778..9f499dd 100644
+--- a/ps2xIOP/src/emulator/services/iop_rpc.cpp
++++ b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+@@ -39,6 +39,8 @@ namespace ps2x::iop::detail
+             m_sifInitialized = true;
+             setV0(0u);
+             return true;
++        case 32: // sceSifSetDmaIntr(dmat, count, completioncb, userdata): sceSifSetDma + completion callback
++            [[fallthrough]];
+         case 7: // sceSifSetDma
+         {
+             constexpr uint32_t kDescriptorSize = 16u;
+-- 
+2.56.0
+

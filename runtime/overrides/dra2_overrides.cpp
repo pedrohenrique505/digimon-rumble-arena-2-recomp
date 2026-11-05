@@ -134,6 +134,9 @@ namespace
 
         static uint64_t entries = 0;
         ++entries;
+        // Servidor "io" do IOPHOOEY (SID 0x12): registra tudo menos o polling de status (fno 5).
+        if (enabled && client == 0x564D98u && fno != 5u)
+            std::fprintf(stderr, "[dra2:io] call fno=%u ra=0x%X (#%llu)\n", fno, ra, static_cast<unsigned long long>(entries));
         if (enabled && (entries <= 40 || entries % 2000 == 0))
         {
             std::fprintf(stderr, "[dra2:rpc] -> entrada #%llu client=0x%X fno=0x%X mode=%u ra=0x%X\n",
@@ -284,6 +287,21 @@ namespace
         it->second(rdram, ctx, runtime);
     }
 
+    // Folhas de C++ (métodos virtuais triviais) que a análise do Ghidra não
+    // reconheceu como funções: 0x3DE1F4..0x3DE218 ficou fora do function map,
+    // então o código gerado não as tem e o JALR indireto (ex.: 0x3DD5CC) cai em
+    // "missing-target". Cada uma é só "jr ra" com, no delay slot, nop ou "li v0, 1".
+    void leafReturnVoid(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
+    void leafReturnOne(uint8_t *, R5900Context *ctx, PS2Runtime *)
+    {
+        setReturnU32(ctx, 1u);
+        ctx->pc = getRegU32(ctx, 31);
+    }
+
     void apply(PS2Runtime &runtime)
     {
         configureDiscImage();
@@ -310,6 +328,10 @@ namespace
         runtime.replaceFunction(0x0040B168u, sifBindRpcBlocking);
         runtime.replaceFunction(0x003F2CD0u, padPortOpenMultitap);
         runtime.replaceFunction(0x0040B338u, sifCallRpcTraced);
+        runtime.replaceFunction(0x003DE1F8u, leafReturnVoid);
+        runtime.replaceFunction(0x003DE200u, leafReturnOne);
+        runtime.replaceFunction(0x003DE208u, leafReturnOne);
+        runtime.replaceFunction(0x003DE210u, leafReturnVoid);
         if (traceGs())
         {
             runtime.replaceFunction(0x00408280u, addIntcHandlerTraced);

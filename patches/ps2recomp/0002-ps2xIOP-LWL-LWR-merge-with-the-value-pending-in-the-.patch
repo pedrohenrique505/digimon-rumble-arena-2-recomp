@@ -1,7 +1,7 @@
 From a57fa3bc6ca536b95df1bd6cb4813418190c4c43 Mon Sep 17 00:00:00 2001
 From: dra2 <dra2@local>
 Date: Wed, 4 Nov 2026 21:05:03 -0300
-Subject: [PATCH 2/5] ps2xIOP: LWL/LWR merge with the value pending in the load
+Subject: [PATCH 2/7] ps2xIOP: LWL/LWR merge with the value pending in the load
  delay slot
 
 ---

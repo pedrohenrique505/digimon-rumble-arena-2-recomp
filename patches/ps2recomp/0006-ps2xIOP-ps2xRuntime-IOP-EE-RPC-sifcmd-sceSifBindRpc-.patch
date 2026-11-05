@@ -1,0 +1,331 @@
+From 0e6b23f43e69c730fc275c08d6ded49442c3cb63 Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Thu, 5 Nov 2026 20:08:39 -0300
+Subject: [PATCH 6/7] ps2xIOP/ps2xRuntime: IOP->EE RPC (sifcmd
+ sceSifBindRpc/sceSifCallRpc)
+
+The IOP-side bind/call exports were stubs returning 0, so an IOP module
+binding to a server registered by the EE (sceSifRegisterRpc) always saw
+client->server == 0. Add IopHost::bindEeRpc/callEeRpc; the runtime looks
+the SID up in its EE server table and runs the server function on the EE
+scheduler, copying rsize bytes of the returned buffer back to IOP RAM.
+---
+ ps2xIOP/include/ps2x/iop/iop_host.h         | 27 +++++++
+ ps2xIOP/src/emulator/services/iop_rpc.cpp   | 82 ++++++++++++++++++++-
+ ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp | 76 +++++++++++++++++++
+ ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h   | 12 +++
+ ps2xRuntime/src/lib/ps2_iop_host.cpp        | 17 +++++
+ ps2xRuntime/src/lib/ps2_iop_host.h          |  6 ++
+ 6 files changed, 218 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xIOP/include/ps2x/iop/iop_host.h b/ps2xIOP/include/ps2x/iop/iop_host.h
+index 1eceb08..951c87e 100644
+--- a/ps2xIOP/include/ps2x/iop/iop_host.h
++++ b/ps2xIOP/include/ps2x/iop/iop_host.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <functional>
++
+ #include "ps2x/iop/iop_types.h"
+ 
+ #include <array>
+@@ -130,6 +132,31 @@ namespace ps2x::iop
+             return false;
+         }
+ 
++        // IOP -> EE RPC (the IOP is the client, the EE registered the server).
++        // bindEeRpc reports the EE server registered for sid, if any.
++        virtual bool bindEeRpc(uint32_t sid, uint32_t &server, uint32_t &buffer, uint32_t &callbackBuffer)
++        {
++            (void)sid;
++            server = buffer = callbackBuffer = 0u;
++            return false;
++        }
++        // callEeRpc copies send into the EE server buffer, runs the server
++        // function on the EE and hands the returned EE pointer to onComplete
++        // (rsize bytes of it are readable through readGuest).
++        virtual bool callEeRpc(uint32_t sid,
++                               uint32_t rpcNumber,
++                               const void *send,
++                               uint32_t sendSize,
++                               std::function<void(uint32_t resultAddress)> onComplete)
++        {
++            (void)sid;
++            (void)rpcNumber;
++            (void)send;
++            (void)sendSize;
++            (void)onComplete;
++            return false;
++        }
++
+         virtual void log(LogLevel level, std::string_view message) = 0;
+     };
+ }
+diff --git a/ps2xIOP/src/emulator/services/iop_rpc.cpp b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+index cf4fdc6..62c8778 100644
+--- a/ps2xIOP/src/emulator/services/iop_rpc.cpp
++++ b/ps2xIOP/src/emulator/services/iop_rpc.cpp
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ #include "iop_rpc.h"
+ 
+ #include "../core/iop_cpu.h"
+@@ -148,10 +149,87 @@ namespace ps2x::iop::detail
+         case 10:
+         case 11:
+         case 14: // InitRpc
+-        case 15:
+-        case 16:
+             setV0(0);
+             return true;
++        case 15: // sceSifBindRpc(client, sid, mode): IOP client of an EE-registered server
++        {
++            const uint32_t client = cpu.gpr[4];
++            const uint32_t sid = cpu.gpr[5];
++            uint32_t server = 0u, buffer = 0u, callbackBuffer = 0u;
++            if (client != 0u && m_memory.ownsRamRange(client, 40u))
++            {
++                m_memory.write32(client + 16u, 0u); // command
++                if (m_host.bindEeRpc(sid, server, buffer, callbackBuffer))
++                {
++                    m_memory.write32(client + 20u, buffer);
++                    m_memory.write32(client + 24u, callbackBuffer);
++                    m_memory.write32(client + 36u, server);
++                }
++                else
++                {
++                    m_memory.write32(client + 36u, 0u);
++                }
++            }
++            setV0(0);
++            return true;
++        }
++        case 16: // sceSifCallRpc(client, rpc, mode, send, ssize, recv, rsize, endFunc, endParam)
++        {
++            const uint32_t client = cpu.gpr[4];
++            const uint32_t rpcNumber = cpu.gpr[5];
++            const uint32_t mode = cpu.gpr[6];
++            const uint32_t send = cpu.gpr[7];
++            const uint32_t sp = cpu.gpr[29];
++            const uint32_t sendSize = m_memory.read32(sp + 16u);
++            const uint32_t recv = m_memory.read32(sp + 20u);
++            const uint32_t recvSize = m_memory.read32(sp + 24u);
++            const uint32_t endFunction = m_memory.read32(sp + 28u);
++            if (client == 0u || !m_memory.ownsRamRange(client, 40u) || m_memory.read32(client + 36u) == 0u)
++            {
++                setV0(static_cast<uint32_t>(-1));
++                return true;
++            }
++            uint32_t sid = 0u;
++            {
++                // The server pointer is an EE address; the SID lives at offset 0 of the EE serve data.
++                uint32_t eeServer = m_memory.read32(client + 36u);
++                if (!m_host.readGuest(eeServer, &sid, sizeof(sid)))
++                {
++                    setV0(static_cast<uint32_t>(-1));
++                    return true;
++                }
++            }
++            std::vector<uint8_t> payload;
++            if (send != 0u && sendSize != 0u && m_memory.ownsRamRange(send, sendSize))
++            {
++                payload.resize(sendSize);
++                (void)m_memory.readRam(send, payload.data(), payload.size());
++            }
++            if (endFunction != 0u)
++            {
++                static bool warned = false;
++                if (!warned)
++                {
++                    warned = true;
++                    m_host.log(LogLevel::Warning, "sceSifCallRpc (IOP->EE): end_function is not invoked yet");
++                }
++            }
++            (void)mode;
++            IopMemory &memory = m_memory;
++            IopHost &host = m_host;
++            const bool queued = m_host.callEeRpc(sid, rpcNumber, payload.data(), static_cast<uint32_t>(payload.size()),
++                                                 [&memory, &host, recv, recvSize](uint32_t resultAddress)
++                                                 {
++                                                     if (recv == 0u || recvSize == 0u || resultAddress == 0u ||
++                                                         !memory.ownsRamRange(recv, recvSize))
++                                                         return;
++                                                     std::vector<uint8_t> reply(recvSize);
++                                                     if (host.readGuest(resultAddress, reply.data(), reply.size()))
++                                                         (void)memory.writeRam(recv, reply.data(), reply.size());
++                                                 });
++            setV0(queued ? 0u : static_cast<uint32_t>(-1));
++            return true;
++        }
+         case 12: // sceSifSendCmd
+         case 13: // isceSifSendCmd
+         {
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
+index 07fcd29..522b520 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.cpp
+@@ -1005,4 +1005,80 @@ namespace ps2_syscalls
+         uint32_t queuePtr = getRegU32(ctx, 4);
+         setReturnS32(ctx, static_cast<int32_t>(queuePtr));
+     }
++
++    bool lookupEeRpcServer(uint8_t *rdram, uint32_t sid, uint32_t &server, uint32_t &buffer, uint32_t &callbackBuffer)
++    {
++        server = buffer = callbackBuffer = 0u;
++        std::lock_guard<std::mutex> lock(g_rpc_mutex);
++        const auto it = g_rpc_servers.find(sid);
++        if (it == g_rpc_servers.end() || it->second.sd_ptr == 0u)
++            return false;
++        const t_SifRpcServerData *sd = reinterpret_cast<const t_SifRpcServerData *>(getConstMemPtr(rdram, it->second.sd_ptr));
++        if (!sd)
++            return false;
++        server = it->second.sd_ptr;
++        buffer = sd->buf;
++        callbackBuffer = sd->cbuf;
++        return true;
++    }
++
++    bool callEeRpcFromIop(uint8_t *rdram,
++                          PS2Runtime *runtime,
++                          uint32_t sid,
++                          uint32_t rpcNumber,
++                          const void *send,
++                          uint32_t sendSize,
++                          std::function<void(uint32_t resultAddress)> onComplete)
++    {
++        if (!rdram || !runtime)
++            return false;
++
++        uint32_t function = 0u;
++        uint32_t buffer = 0u;
++        {
++            std::lock_guard<std::mutex> lock(g_rpc_mutex);
++            const auto it = g_rpc_servers.find(sid);
++            if (it == g_rpc_servers.end())
++                return false;
++            t_SifRpcServerData *sd = reinterpret_cast<t_SifRpcServerData *>(getMemPtr(rdram, it->second.sd_ptr));
++            if (!sd || sd->func == 0u)
++                return false;
++            function = sd->func;
++            buffer = sd->buf;
++            sd->rpc_number = static_cast<int>(rpcNumber);
++            sd->size = static_cast<int>(sendSize);
++        }
++        if (!runtime->hasFunction(function))
++            return false;
++
++        // SIF DMA of the send data into the EE server buffer.
++        if (send && sendSize != 0u && buffer != 0u)
++        {
++            uint8_t *const dst = getMemPtr(rdram, buffer);
++            uint8_t *const dstLast = getMemPtr(rdram, buffer + sendSize - 1u);
++            if (!dst || !dstLast || static_cast<size_t>(dstLast - dst) != sendSize - 1u)
++                return false;
++            std::memcpy(dst, send, sendSize);
++        }
++
++        // The EE server thread (sceSifRpcLoop) would run func(rpc_number, buf, size).
++        GuestInvocation invocation{};
++        invocation.kind = GuestInvocationKind::RpcCallback;
++        invocation.tag = sid;
++        invocation.context = runtime->cpu();
++        invocation.context.pc = function;
++        SET_GPR_U32(&invocation.context, 4, rpcNumber);
++        SET_GPR_U32(&invocation.context, 5, buffer);
++        SET_GPR_U32(&invocation.context, 6, sendSize);
++        SET_GPR_U32(&invocation.context, 7, 0u);
++        SET_GPR_U32(&invocation.context, 29, 0u);
++        SET_GPR_U32(&invocation.context, 31, 0u);
++        invocation.onComplete = [done = std::move(onComplete)](const R5900Context &finished, R5900Context &)
++        {
++            if (done)
++                done(getRegU32(&finished, 2));
++        };
++        runtime->eeScheduler().queueInvocation(std::move(invocation));
++        return true;
++    }
+ }
+diff --git a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
+index 5e9a446..0b308e0 100644
+--- a/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
++++ b/ps2xRuntime/src/lib/Kernel/Syscalls/RPC.h
+@@ -2,6 +2,8 @@
+ 
+ #include "ps2_syscalls.h"
+ 
++#include <functional>
++
+ namespace ps2_syscalls
+ {
+     void SifStopModule(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+@@ -17,4 +19,14 @@ namespace ps2_syscalls
+     void sceSifCallRpc(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceSifSendCmd(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
+     void sceRpcGetPacket(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime);
++
++    // IOP -> EE RPC: the IOP binds/calls a server the EE registered with sceSifRegisterRpc.
++    bool lookupEeRpcServer(uint8_t *rdram, uint32_t sid, uint32_t &server, uint32_t &buffer, uint32_t &callbackBuffer);
++    bool callEeRpcFromIop(uint8_t *rdram,
++                          PS2Runtime *runtime,
++                          uint32_t sid,
++                          uint32_t rpcNumber,
++                          const void *send,
++                          uint32_t sendSize,
++                          std::function<void(uint32_t resultAddress)> onComplete);
+ }
+diff --git a/ps2xRuntime/src/lib/ps2_iop_host.cpp b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+index 8d46e03..ba64fea 100644
+--- a/ps2xRuntime/src/lib/ps2_iop_host.cpp
++++ b/ps2xRuntime/src/lib/ps2_iop_host.cpp
+@@ -3,6 +3,7 @@
+ #include "ps2_runtime.h"
+ #include "ps2_stubs.h"
+ #include "Kernel/Stubs/SIF.h"
++#include "Kernel/Syscalls/RPC.h"
+ #include "runtime/ps2_memory.h"
+ #include "Kernel/Stubs/MemoryCard.h"
+ #include "Kernel/Syscalls/Common.h"
+@@ -517,6 +518,22 @@ bool PS2IopHostAdapter::sendSifCommand(uint32_t commandId,
+                                          packetSize);
+ }
+ 
++bool PS2IopHostAdapter::bindEeRpc(uint32_t sid, uint32_t &server, uint32_t &buffer, uint32_t &callbackBuffer)
++{
++    uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
++    return ps2_syscalls::lookupEeRpcServer(rdram, sid, server, buffer, callbackBuffer);
++}
++
++bool PS2IopHostAdapter::callEeRpc(uint32_t sid,
++                                  uint32_t rpcNumber,
++                                  const void *send,
++                                  uint32_t sendSize,
++                                  std::function<void(uint32_t resultAddress)> onComplete)
++{
++    uint8_t *const rdram = m_activeRdram ? m_activeRdram : m_runtime.memory().getRDRAM();
++    return ps2_syscalls::callEeRpcFromIop(rdram, &m_runtime, sid, rpcNumber, send, sendSize, std::move(onComplete));
++}
++
+ void PS2IopHostAdapter::log(ps2x::iop::LogLevel level, std::string_view message)
+ {
+     const char *prefix = "[ps2xIOP]";
+diff --git a/ps2xRuntime/src/lib/ps2_iop_host.h b/ps2xRuntime/src/lib/ps2_iop_host.h
+index 89d8576..51031ae 100644
+--- a/ps2xRuntime/src/lib/ps2_iop_host.h
++++ b/ps2xRuntime/src/lib/ps2_iop_host.h
+@@ -83,6 +83,12 @@ public:
+                              uint32_t a3,
+                              uint32_t *resultAddress) override;
+     bool sendSifCommand(uint32_t commandId, const void *packet, size_t packetSize) override;
++    bool bindEeRpc(uint32_t sid, uint32_t &server, uint32_t &buffer, uint32_t &callbackBuffer) override;
++    bool callEeRpc(uint32_t sid,
++                   uint32_t rpcNumber,
++                   const void *send,
++                   uint32_t sendSize,
++                   std::function<void(uint32_t resultAddress)> onComplete) override;
+ 
+     void log(ps2x::iop::LogLevel level, std::string_view message) override;
+ 
+-- 
+2.56.0
+

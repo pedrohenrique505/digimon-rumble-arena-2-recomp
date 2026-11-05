@@ -29,3 +29,17 @@
 1. Investigar por que o jogo não sai da tela preta. O principal suspeito é o `[IOP] Couldn't bind callback rpc.` (o IOPHOOEY faz bind no SID `0x20` do EE): sem esse canal, o carregamento por streaming deve estar parado.
 2. Considerar um patch que desligue a heurística de "candidato" do upstream (ela engana o diagnóstico), ou deixá-la atrás de uma variável de ambiente.
 3. Desempenho do GS em software.
+
+## Callback RPC e o carregamento pelo IOPHOOEY (patches 0006 e 0007)
+- **0006, RPC IOP→EE:** no `ps2xIOP`, o `sceSifBindRpc` (sifcmd 15) e o `sceSifCallRpc` (16) eram stubs que retornavam 0, então `client->server` ficava 0 e o IOPHOOEY dizia "Couldn't bind callback rpc.". Agora:
+  - `IopHost::bindEeRpc`/`callEeRpc` (métodos virtuais com implementação padrão `false`);
+  - o runtime procura o SID em `g_rpc_servers`, copia o envio para o `buf` do servidor do EE e roda a função do servidor via `eeScheduler().queueInvocation` (o papel do `sceSifRpcLoop` do EE); `rsize` bytes do retorno voltam para a RAM do IOP;
+  - layout do `SifRpcClientData_t` do IOP no ps2sdk: `command` +16, `buf` +20, `cbuf` +24, `end_function` +28, `end_param` +32, `server` +36. O `end_function` (modo NOWAIT) ainda não é chamado; o jogo não usa.
+  - No jogo: o servidor SID `0x20` do EE (`0x3EA170`, thread criada em `0x3E94E8`) só enfileira eventos de 2 words, por exemplo `(0x00FFE390, tamanho)`, depois de abrir ou ler arquivos.
+- **0007, `sceSifSetDmaIntr` (sifman 32):** caía no `default` e retornava 0 ("fila de DMA cheia"), então o driver repetia sem parar (cerca de 6.500 vezes por segundo, achado com um histograma temporário dos imports do IOP). Agora faz a mesma cópia do `sceSifSetDma` e agenda o callback de conclusão em `pendingGuestCallbacks`. Ordinais: [ps2sdk sifman exports.tab](https://github.com/ps2dev/ps2sdk/blob/master/iop/system/sifman/src/exports.tab).
+- Laço de carga do EE: `FUN_0037FB48` faz `while (pendentes && status_io != 5) frame();`, com o status vindo do `fno 5` do servidor "io" (SID `0x12`, client `0x564D98`).
+- Resultado: o carregamento anda (abre → evento com tamanho → lê → fecha → próximo arquivo).
+
+## Novo bloqueio: funções que o Ghidra não reconheceu
+- `JALR` indireto para `0x3DE1F8`: um buraco no function map (`0x3DE1F4..0x3DE218`) com 4 folhas de C++ (`jr ra` com `nop` ou `li v0,1`). Resolvido provisoriamente por override (`leafReturnVoid`/`leafReturnOne`).
+- Logo depois vem `0x29FF38`, do mesmo tipo. Um script achou **1.200 buracos com `jr ra`** entre as funções do `.text` no CSV exportado. Correção certa: criar funções nesses buracos no Ghidra headless, reexportar, regenerar e reconfigurar o build.
