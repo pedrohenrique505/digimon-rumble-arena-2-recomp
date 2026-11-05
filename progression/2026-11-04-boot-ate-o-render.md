@@ -19,7 +19,7 @@ Build completo no sistema novo: 31 min na 1ª vez. Depois disso, uma mudança no
 ### 4. Laço infinito no `sceSifCallRpc`: bug de convenção no bind por endereço
 - Com `DRA2_TRACE_RPC=1`: 508 mil entradas em 20 s no mesmo `CallRpc` (client `0x542E10`, SID `0x10`, NOWAIT, com `end_function`), e nenhuma retorna.
 - Causa: o HLE agenda o callback com uma **cópia do contexto** para retomar depois. Os stubs gerados pelo `ps2_recomp` fazem `ctx->pc = $ra` **antes** de chamar o handler, mas o `bindAddressHandler` do upstream não faz isso. Na retomada, o `pc` volta para a entrada da função, que roda de novo.
-- **Correção:** trampolim próprio (`sdkTrampoline`) que faz `pc = ra` e depois chama o handler (os nomes são resolvidos pelas X-macros `PS2_SYSCALL_LIST`/`PS2_STUB_LIST`). Convenção documentada no topo do `dra2_overrides.cpp`. Candidato a issue/PR no upstream.
+- **Correção:** trampolim próprio (`sdkTrampoline`) que faz `pc = ra` e depois chama o handler (os nomes são resolvidos pelas X-macros `PS2_SYSCALL_LIST`/`PS2_STUB_LIST`). Convenção documentada no topo do `dra2_overrides.cpp`.
 
 ### 5. IOP em loop no `cdvdman:14` (patch 0001)
 - O `IOPHOOEY` consulta a bandeja do leitor em loop. O export 14 é o `sceCdTrayReq` ([ps2sdk exports.tab](https://github.com/ps2dev/ps2sdk/blob/master/iop/cdvd/cdvdman/src/exports.tab)). Semântica no [cdvdman.c do ps2sdk](https://github.com/ps2dev/ps2sdk/blob/master/iop/cdvd/cdvdman/src/cdvdman.c): `SCECdTrayCheck` escreve em `*traychk` e retorna 1.
@@ -45,4 +45,4 @@ Build completo no sistema novo: 31 min na 1ª vez. Depois disso, uma mudança no
 ## Próximos passos
 1. Seguir o DMA do VIF1 (`tadr=0x5FAD80`, tag END com `qwc=0xA2`): ver os VIFcodes (MPG/UNPACK/MSCAL/DIRECT), se o VU1 roda e se o XGKICK chega ao GIF. Pesquisar como o PS2Recomp/eagle_five tratam o VU1.
 2. Investigar o "callback rpc" (bind IOP → EE).
-3. Abrir issues/PRs no PS2Recomp com os patches 0001 a 0004 e o problema do `bindAddressHandler`.
+3. Seguir corrigindo nós mesmos os problemas do runtime/IOP, como patches em `patches/ps2recomp/` (decisão de 2026-11-04: não abrimos issues/PRs no upstream).

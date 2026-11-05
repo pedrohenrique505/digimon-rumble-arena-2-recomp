@@ -10,7 +10,7 @@
 1. Terminar o build em `build/` e rodar: `cd game && timeout -s INT 60 ../build/dra2 "$PWD/SLUS_210.67"`.
    - Conferir no log: `[dra2] N/98 SDK bindings aplicados` e se o boot passa do `sceSifInitRpc`.
    - Confirmar que um override novo recompila em segundos (o objetivo do build novo).
-2. Seguir o loop do upstream: corrigir os bloqueios duros (função não encontrada, syscall TODO, I/O de CD), um de cada vez, pesquisando antes (PCSX2, ps2sdk, issues do PS2Recomp).
+2. Seguir o loop do upstream: corrigir os bloqueios duros (função não encontrada, syscall TODO, I/O de CD), um de cada vez, pesquisando antes (PCSX2, ps2sdk, issues do PS2Recomp como referência).
 3. Levar os nomes do SDK achados pelo analyzer (308, incluindo os 200 sem handler: libc, libm, exceções C++, timers) para o Ghidra, via script headless que aplique os nomes, para que o export e a análise usem esses nomes.
 4. Nomear as funções do Lua 5.0 comparando com o código-fonte oficial.
 5. Mais adiante: VU1 (8 overlays DVP), GS (avaliar o paraLLEl-GS) e áudio (SPU2).

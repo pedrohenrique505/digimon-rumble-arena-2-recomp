@@ -10,7 +10,7 @@ O código MIPS R5900 do Emotion Engine é traduzido para C++ e ligado a um runti
 
 **O jogo roda o laço principal.** O ELF inteiro recompila com o [PS2Recomp](https://github.com/ran-j/ps2recomp) (78.202 funções, 0 instruções não tratadas). Os 10 módulos IOP do jogo rodam no IOP emulado, o driver próprio do jogo lê o disco, e o jogo manda DMA de render todo frame. O bloqueio atual é o pipeline VIF1/VU1 → GS: o fim de frame ainda não chega ao GS.
 
-Correções genéricas que fizemos no runtime/IOP do PS2Recomp ficam em [`patches/ps2recomp/`](patches/ps2recomp/).
+Bugs encontrados no runtime/IOP do PS2Recomp são corrigidos por nós e mantidos como patches em [`patches/ps2recomp/`](patches/ps2recomp/).
 
 Veja [`progression/`](progression/) para o diário de progresso.
 
@@ -19,7 +19,7 @@ Veja [`progression/`](progression/) para o diário de progresso.
 - `docs/`: pesquisa e documentação técnica ([ferramentas](docs/ferramentas.md))
 - `progression/`: registro do progresso do projeto, por data
 - `runtime/overrides/`: correções específicas do jogo (game overrides do PS2Recomp)
-- `patches/ps2recomp/`: correções genéricas aplicadas ao clone do PS2Recomp (candidatas a PR)
+- `patches/ps2recomp/`: nossas correções no runtime/IOP do PS2Recomp, aplicadas ao clone
 - `tools/`: export do Ghidra, bindings do SDK e aplicação dos patches
 - `CMakeLists.txt`: build do executável (runtime do PS2Recomp + código gerado + overrides)
 
