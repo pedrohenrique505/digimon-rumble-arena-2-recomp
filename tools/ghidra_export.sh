@@ -19,7 +19,11 @@ mkdir -p "$PROJ_DIR" "$OUT_DIR"
 
 # No modo headless, cada askFile() do script consome um argumento, em ordem:
 # 1) arquivo TOML de saída, 2) arquivo CSV de saída.
-SCRIPT=(-scriptPath "$SCRIPT_DIR" -postScript ExportPS2Functions.java
+# CreateGapFunctions.java (nosso, em tools/ghidra) roda antes: cria funções nos
+# buracos de código que a auto-análise não pegou (folhas alcançadas só por JALR).
+SCRIPT=(-scriptPath "$ROOT/tools/ghidra;$SCRIPT_DIR"
+        -postScript CreateGapFunctions.java
+        -postScript ExportPS2Functions.java
         "$OUT_DIR/$NAME.toml" "$OUT_DIR/$NAME.csv")
 
 if [ -d "$PROJ_DIR/DRA2_headless.rep" ]; then

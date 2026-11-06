@@ -43,3 +43,17 @@
 ## Novo bloqueio: funções que o Ghidra não reconheceu
 - `JALR` indireto para `0x3DE1F8`: um buraco no function map (`0x3DE1F4..0x3DE218`) com 4 folhas de C++ (`jr ra` com `nop` ou `li v0,1`). Resolvido provisoriamente por override (`leafReturnVoid`/`leafReturnOne`).
 - Logo depois vem `0x29FF38`, do mesmo tipo. Um script achou **1.200 buracos com `jr ra`** entre as funções do `.text` no CSV exportado. Correção certa: criar funções nesses buracos no Ghidra headless, reexportar, regenerar e reconfigurar o build.
+
+## Buracos no function map resolvidos no export (CreateGapFunctions)
+- `tools/ghidra/CreateGapFunctions.java` roda no headless antes do `ExportPS2Functions.java`. Os buracos são calculados como `.text*` menos a união dos corpos das funções. A 1ª versão pulava para o `getMaxAddress()` do corpo, e corpos não contíguos faziam o laço saltar trechos grandes, por isso achava 0.
+- Resultado: 9 buracos com `jr ra`, 31 funções novas (ex.: `0x1F7CCC..0x1F7D04`, `0x2802BC..0x280394`, `0x36F4C0..`). O CSV final não tem nenhum buraco com `jr ra` em `.text`. As folhas `0x3DE1F8` e `0x29FF38` já estavam no mapa de um export anterior, e os overrides `leafReturnVoid`/`leafReturnOne` foram removidos.
+- Mesma estratégia do [BT3-Recomp](https://github.com/z3xox/BT3-Recomp) (`games/bt3/dbzp_gaps.csv`, `dbzp_missing.csv`). Ele também tem um interpretador MIPS de fallback (`ps2xRuntime/src/lib/ps2_interp.cpp`, `PS2Runtime::interpretUntil`) para destinos não recompilados, que é candidato a patch nosso se aparecerem mais buracos.
+- Execução de 60 s: nenhum `missing-target`. Antes, o jogo parava em `pc=0x29FF38` com `dma=128`; agora o PC anda e o DMA sobe (`dma=1026` no tick 480).
+
+## Referências de outros ports
+- BT3-Recomp (PS2Recomp): função por buraco, interpretador de fallback, máscara de ponteiros kseg0 (`& 0x1FFFFFFF`), DMAE religado no reset da libdma, paraLLEl-GS opcional, `PS2X_ASYNC_KICK` (VIF/VU1/GIF numa thread), `gen_vu1.py` (VU1 → C++).
+- [Downhill Revived](https://github.com/skuza-oss/downhill-revived): decomp matching, não recomp. Serve de referência para o renderer nativo (`port/gs`, `port/render`).
+
+## Próximos passos
+1. Ver o que aparece na tela agora (screenshot) e acompanhar a carga com `DRA2_TRACE_RPC=1`.
+2. Desempenho do GS em software (cerca de 8 VBlanks/s agora).

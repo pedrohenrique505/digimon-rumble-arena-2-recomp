@@ -287,21 +287,6 @@ namespace
         it->second(rdram, ctx, runtime);
     }
 
-    // Folhas de C++ (métodos virtuais triviais) que a análise do Ghidra não
-    // reconheceu como funções: 0x3DE1F4..0x3DE218 ficou fora do function map,
-    // então o código gerado não as tem e o JALR indireto (ex.: 0x3DD5CC) cai em
-    // "missing-target". Cada uma é só "jr ra" com, no delay slot, nop ou "li v0, 1".
-    void leafReturnVoid(uint8_t *, R5900Context *ctx, PS2Runtime *)
-    {
-        ctx->pc = getRegU32(ctx, 31);
-    }
-
-    void leafReturnOne(uint8_t *, R5900Context *ctx, PS2Runtime *)
-    {
-        setReturnU32(ctx, 1u);
-        ctx->pc = getRegU32(ctx, 31);
-    }
-
     void apply(PS2Runtime &runtime)
     {
         configureDiscImage();
@@ -328,10 +313,6 @@ namespace
         runtime.replaceFunction(0x0040B168u, sifBindRpcBlocking);
         runtime.replaceFunction(0x003F2CD0u, padPortOpenMultitap);
         runtime.replaceFunction(0x0040B338u, sifCallRpcTraced);
-        runtime.replaceFunction(0x003DE1F8u, leafReturnVoid);
-        runtime.replaceFunction(0x003DE200u, leafReturnOne);
-        runtime.replaceFunction(0x003DE208u, leafReturnOne);
-        runtime.replaceFunction(0x003DE210u, leafReturnVoid);
         if (traceGs())
         {
             runtime.replaceFunction(0x00408280u, addIntcHandlerTraced);
