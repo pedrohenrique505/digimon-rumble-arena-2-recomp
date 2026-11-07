@@ -24,7 +24,7 @@ ISO, ELF, IRX, `.RES`, conteúdo extraído, savestates, projetos Ghidra e **cód
 
 ## Layout local (fora do git)
 
-- `game/`: `SLUS_210.67`, `SYSTEM.CNF` e `IOP/*.IRX`, extraídos da ISO em `~/Downloads/Digimon Rumble Arena 2 (USA)/`.
+- `game/`: `SLUS_210.67`, `SYSTEM.CNF` e `IOP/*.IRX`, extraídos da ISO em `~/Downloads/Digimon Rumble Arena 2 (USA) - PlayStation 2/`.
 - `ghidra/DRA2`: projeto da GUI do usuário. Fica travado enquanto a GUI está aberta, então **não use em headless**.
 - `ghidra/headless/DRA2_headless`: projeto separado, usado pelo script de export.
 - `ghidra/export/`: `SLUS_210.67.toml` (config do PS2Recomp) e `SLUS_210.67.csv` (function map).
@@ -67,7 +67,7 @@ cmake --build build --target dra2 -j5   # -j5 cabe nos 7 GB de RAM
 
 # Rodar (o cdRoot é o diretório do ELF, então game/ precisa do disco inteiro extraído).
 # DRA2_ISO = ISO original: o IOP lê os setores reais (sem ela, usa um ISO virtual montado a partir de game/).
-cd game && DRA2_ISO="$HOME/Downloads/Digimon Rumble Arena 2 (USA)/Digimon Rumble Arena 2 (USA).iso" \
+cd game && DRA2_ISO="$HOME/Downloads/Digimon Rumble Arena 2 (USA) - PlayStation 2/Digimon Rumble Arena 2 (USA).iso" \
   timeout -s INT 60 ../build/dra2 "$PWD/SLUS_210.67"
 # Diagnóstico: DRA2_TRACE_RPC=1 (cada sceSifCallRpc), DRA2_TRACE_GS=1 (CSR/IMR/flag do limitador, AddIntcHandler/EnableIntc)
 ```
