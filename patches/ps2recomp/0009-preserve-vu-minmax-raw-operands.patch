@@ -1,0 +1,175 @@
+Subject: [PATCH] ps2xRuntime: preserve raw VU MIN/MAX operands
+
+MIN/MAX select sign/magnitude operands without arithmetic clamping. Keep I
+raw until consumed and cover vector, broadcast and immediate variants.
+
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1695,7 +1695,7 @@
+             execUpper(decoded.upper);
+             float immediate = 0.0f;
+             std::memcpy(&immediate, &decoded.lower, sizeof(immediate));
+-            m_state.i = normalizeOperand(immediate);
++            m_state.i = immediate;
+         }
+         else if (decoded.upperVfShadowReg != 0u)
+         {
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_upper.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_upper.cpp
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_upper.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_upper.cpp
+@@ -7,6 +7,21 @@
+ 
+ namespace
+ {
++    // MIN/MAX select raw operands, including denormals and exponent 255.
++    // Compare their sign/magnitude encoding without host FP canonicalization.
++    float vuMinMax(float a, float b, bool maximum)
++    {
++        int32_t left, right;
++        std::memcpy(&left, &a, sizeof(left));
++        std::memcpy(&right, &b, sizeof(right));
++        const bool reverse = left < 0 && right < 0;
++        const bool chooseLeft = (maximum != reverse) ? left > right : left < right;
++        const int32_t bits = chooseLeft ? left : right;
++        float result;
++        std::memcpy(&result, &bits, sizeof(result));
++        return result;
++    }
++
+     int32_t vuFloatToInt(float value, float scale)
+     {
+         const double scaled = static_cast<double>(value) * static_cast<double>(scale);
+@@ -31,20 +46,22 @@
+     uint8_t op = instr & 0x3F;
+ 
+     float *vd = m_state.vf[fd];
++    const bool minMax = (op >= 0x10u && op <= 0x17u) ||
++                        op == 0x1Du || op == 0x1Fu || op == 0x2Bu || op == 0x2Fu;
+     float normalizedVs[4];
+     float normalizedVt[4];
+     float normalizedAcc[4];
+     for (uint32_t component = 0; component < 4u; ++component)
+     {
+-        normalizedVs[component] = normalizeOperand(m_state.vf[fs][component]);
+-        normalizedVt[component] = normalizeOperand(m_state.vf[ft][component]);
++        normalizedVs[component] = minMax ? m_state.vf[fs][component] : normalizeOperand(m_state.vf[fs][component]);
++        normalizedVt[component] = minMax ? m_state.vf[ft][component] : normalizeOperand(m_state.vf[ft][component]);
+         normalizedAcc[component] = normalizeOperand(m_state.acc[component]);
+     }
+     const float *vs = normalizedVs;
+     const float *vt = normalizedVt;
+     const float *acc = normalizedAcc;
+     const float q = normalizeOperand(m_state.q);
+-    const float i = normalizeOperand(m_state.i);
++    const float i = minMax ? m_state.i : normalizeOperand(m_state.i);
+     float result[4];
+ 
+     // Upper opcode decoding (bits 5:0 of upper word)
+@@ -99,9 +116,9 @@
+     case 0x12:
+     case 0x13: // MAXbc
+     {
+-        float bc = broadcast(vt, op & 3);
+-        for (int c = 0; c < 4; c++)
+-            result[c] = (vs[c] > bc) ? vs[c] : bc;
++        float bc = vt[op & 3];
++        for (int c = 0; c < 4; c++)
++            result[c] = vuMinMax(vs[c], bc, true);
+         applyDest(vd, result, dest);
+         return;
+     }
+@@ -110,9 +127,9 @@
+     case 0x16:
+     case 0x17: // MINIbc
+     {
+-        float bc = broadcast(vt, op & 3);
+-        for (int c = 0; c < 4; c++)
+-            result[c] = (vs[c] < bc) ? vs[c] : bc;
++        float bc = vt[op & 3];
++        for (int c = 0; c < 4; c++)
++            result[c] = vuMinMax(vs[c], bc, false);
+         applyDest(vd, result, dest);
+         return;
+     }
+@@ -134,7 +151,7 @@
+         return;
+     case 0x1D: // MAXi
+         for (int c = 0; c < 4; c++)
+-            result[c] = (vs[c] > i) ? vs[c] : i;
++            result[c] = vuMinMax(vs[c], i, true);
+         applyDest(vd, result, dest);
+         return;
+     case 0x1E: // MULi
+@@ -144,7 +161,7 @@
+         return;
+     case 0x1F: // MINIi
+         for (int c = 0; c < 4; c++)
+-            result[c] = (vs[c] < i) ? vs[c] : i;
++            result[c] = vuMinMax(vs[c], i, false);
+         applyDest(vd, result, dest);
+         return;
+     case 0x20: // ADDq
+@@ -204,7 +221,7 @@
+         return;
+     case 0x2B: // MAX
+         for (int c = 0; c < 4; c++)
+-            result[c] = (vs[c] > vt[c]) ? vs[c] : vt[c];
++            result[c] = vuMinMax(vs[c], vt[c], true);
+         applyDest(vd, result, dest);
+         return;
+     case 0x2C: // SUB
+@@ -226,7 +243,7 @@
+         return;
+     case 0x2F: // MINI
+         for (int c = 0; c < 4; c++)
+-            result[c] = (vs[c] < vt[c]) ? vs[c] : vt[c];
++            result[c] = vuMinMax(vs[c], vt[c], false);
+         applyDest(vd, result, dest);
+         return;
+ 
+diff --git a/ps2xTest/src/ps2_vu1_tests.cpp b/ps2xTest/src/ps2_vu1_tests.cpp
+--- a/ps2xTest/src/ps2_vu1_tests.cpp
++++ b/ps2xTest/src/ps2_vu1_tests.cpp
+@@ -217,6 +217,41 @@
+ {
+     MiniTest::Case("PS2VU1", [](TestCase &tc)
+     {
++        tc.Run("MIN MAX preserve raw operands across vector broadcast and immediate forms", [](TestCase &t)
++        {
++            const uint32_t operands[][2] = {
++                {0u, 0x58u}, {0x80000058u, 0x80000020u},
++                {0u, 0x80000000u}, {0x7fc00001u, 0x7fffffffu},
++                {0xff800001u, 0xffc00001u}};
++            const uint8_t ops[] = {0x2b, 0x2f, 0x10, 0x14, 0x1d, 0x1f};
++            for (uint8_t op : ops)
++            for (const auto &pair : operands)
++            {
++                Vu1Fixture fx;
++                t.IsTrue(fx.initialize(), "VU fixture initializes");
++                VU1Interpreter vu;
++                for (int lane = 0; lane < 4; ++lane)
++                {
++                    std::memcpy(&vu.state().vf[1][lane], &pair[0], 4);
++                    std::memcpy(&vu.state().vf[2][lane], &pair[1], 4);
++                }
++                // Load I through its actual immediate instruction path.
++                writeVuInstructionPair(fx.code, 0, pair[1], kVuUpperNop | 0x80000000u);
++                writeVuInstructionPair(fx.code, 8, 0, makeVuUpper(op, 0xf, 2, 1, 3));
++                vu.execute(fx.code, PS2_VU1_CODE_SIZE, fx.data, PS2_VU1_DATA_SIZE,
++                           fx.gs, &fx.mem, 0, 0, 0, 6);
++                const bool maximum = op == 0x2b || op == 0x10 || op == 0x1d;
++                const auto key = [](uint32_t bits) { return (bits & 0x80000000u) ? ~bits : bits ^ 0x80000000u; };
++                const uint32_t expected = (maximum ? key(pair[0]) > key(pair[1]) : key(pair[0]) < key(pair[1])) ? pair[0] : pair[1];
++                for (int lane = 0; lane < 4; ++lane)
++                {
++                    uint32_t actual;
++                    std::memcpy(&actual, &vu.state().vf[3][lane], 4);
++                    t.Equals(actual, expected, "selected operand retains every bit");
++                }
++            }
++        });
++
+         tc.Run("upper ADD applies the destination mask", [](TestCase &t)
+         {
+             Vu1Fixture fx;
