@@ -1,0 +1,31 @@
+From ab09da68f83187ae76257debcc0a2a2cefb45390 Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sat, 7 Nov 2026 22:28:26 -0300
+Subject: [PATCH] ps2xRuntime: evitar chamadas libm no filtro bilinear de
+ canais
+
+---
+ ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index c509a21..0d65291 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -297,7 +297,12 @@ namespace
+     {
+         const float top = static_cast<float>(c00) + (static_cast<float>(c10) - static_cast<float>(c00)) * fx;
+         const float bottom = static_cast<float>(c01) + (static_cast<float>(c11) - static_cast<float>(c01)) * fx;
+-        return clampU8(static_cast<int>(std::lround(top + (bottom - top) * fy)));
++        // Bilinear channel values are in [0, 255]. Converting after adding
++        // 0.5 is equivalent to lround here, without four libm calls per texel.
++        // Add in double: float + 0.5f can round the predecessor of a half
++        // integer up too early (for example nextafter(0.5f, 0.0f)).
++        const float value = top + (bottom - top) * fy;
++        return clampU8(static_cast<int>(static_cast<double>(value) + 0.5));
+     }
+ }
+ 
+-- 
+2.56.0
+
