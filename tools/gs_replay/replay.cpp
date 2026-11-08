@@ -152,6 +152,38 @@ try
         }
     };
     reset();
+    // Local-to-host FIFO adapter state (GPU only). The candidate delivers
+    // whole 16-byte words and zero-fills past the end; the runtime consumer
+    // asks for arbitrary byte counts. Keep unconsumed bytes in a residual
+    // buffer and rebuild the sub-word tail from synchronized VRAM.
+    uint64_t xferRegs[4] = {};
+    bool fifoActive = false;
+    uint32_t fifoTotalBytes = 0, fifoQwordsLeft = 0;
+    std::vector<uint8_t> fifoResidual;
+    bool fifoTailLoaded = false;
+    std::vector<uint8_t> oracleVram;
+    GSCpuBackend fifoOracle, fifoVerify;
+    bool fifoOracleReady = false;
+    auto fifoSetup = [&]
+    {
+        const unsigned spsm = (xferRegs[0] >> 24) & 63;
+        unsigned bpp = 0;
+        switch (spsm)
+        {
+        case 0: case 0x30: bpp = 32; break;
+        case 1: case 0x31: bpp = 24; break;
+        case 2: case 0xa: case 0x32: case 0x3a: bpp = 16; break;
+        case 0x13: case 0x1b: bpp = 8; break;
+        case 0x14: case 0x24: case 0x2c: bpp = 4; break;
+        default: throw std::runtime_error("unsupported local-to-host PSM");
+        }
+        fifoTotalBytes = ((xferRegs[2] & 0xfff) * ((xferRegs[2] >> 32) & 0xfff) * bpp) / 8;
+        fifoQwordsLeft = fifoTotalBytes / 16;
+        fifoResidual.clear();
+        fifoTailLoaded = false;
+        fifoOracleReady = false;
+        fifoActive = true;
+    };
 #endif
     for (size_t index = 1; index < records.size(); index++)
     {
@@ -174,7 +206,11 @@ try
         {
             auto v = values<uint64_t, 2>(r);
 #ifdef DRA2_PARALLEL_GS
+            if (v[0] >= 0x50 && v[0] <= 0x53)
+                xferRegs[v[0] - 0x50] = v[1];
             gpu.write_register(ParallelGS::RegisterAddr(v[0]), v[1]);
+            if (v[0] == 0x53 && (v[1] & 3) == 1)
+                fifoSetup();
 #else
             gs.writeRegister(v[0], v[1]);
 #endif
@@ -338,7 +374,89 @@ try
                 throw std::runtime_error("oversized readback request");
             readbacks++;
 #ifdef DRA2_PARALLEL_GS
-            throw std::runtime_error("local-to-host GIF FIFO consumption needs explicit GPU adapter");
+            if (!fifoActive)
+                throw std::runtime_error("local-to-host consumption without transfer");
+            if (!fifoOracleReady)
+            {
+                gpu.flush();
+                oracleVram.assign(static_cast<const uint8_t *>(gpu.map_vram_read(0, VRAM)),
+                                  static_cast<const uint8_t *>(gpu.map_vram_read(0, VRAM)) + VRAM);
+                fifoOracle.Initialize(oracleVram.data(), VRAM);
+                GSTransferCommand cmd{};
+                cmd.bitbltbuf.sbp = xferRegs[0] & 0x3fff;
+                cmd.bitbltbuf.sbw = (xferRegs[0] >> 16) & 0x3f;
+                cmd.bitbltbuf.spsm = (xferRegs[0] >> 24) & 0x3f;
+                cmd.bitbltbuf.dbp = (xferRegs[0] >> 32) & 0x3fff;
+                cmd.bitbltbuf.dbw = (xferRegs[0] >> 48) & 0x3f;
+                cmd.bitbltbuf.dpsm = (xferRegs[0] >> 56) & 0x3f;
+                cmd.trxpos.ssax = xferRegs[1] & 0x7ff;
+                cmd.trxpos.ssay = (xferRegs[1] >> 16) & 0x7ff;
+                cmd.trxpos.dsax = (xferRegs[1] >> 32) & 0x7ff;
+                cmd.trxpos.dsay = (xferRegs[1] >> 48) & 0x7ff;
+                cmd.trxpos.dir = (xferRegs[1] >> 59) & 3;
+                cmd.trxreg.rrw = xferRegs[2] & 0xfff;
+                cmd.trxreg.rrh = (xferRegs[2] >> 32) & 0xfff;
+                cmd.direction = 1;
+                fifoOracle.BeginTransfer(cmd);
+                fifoVerify.Initialize(oracleVram.data(), VRAM);
+                fifoVerify.BeginTransfer(cmd);
+                fifoOracleReady = true;
+            }
+            {
+                // Serve from residual/FIFO/tail, then verify against the CPU
+                // oracle stream, which mirrors the logical byte order.
+                std::vector<uint8_t> data(v[0]);
+                uint32_t served = 0;
+                while (served < v[0])
+                {
+                    if (fifoResidual.empty())
+                    {
+                        if (fifoQwordsLeft)
+                        {
+                            fifoResidual.resize(16);
+                            gpu.read_transfer_fifo(fifoResidual.data(), 1);
+                            fifoQwordsLeft--;
+                        }
+                        else if (!fifoTailLoaded)
+                        {
+                            fifoTailLoaded = true;
+                            const uint32_t tail = fifoTotalBytes % 16;
+                            if (!tail)
+                                break;
+                            fifoResidual.assign(tail, 0);
+                            std::vector<uint8_t> drain(fifoTotalBytes - tail);
+                            for (uint32_t drained = 0; drained < drain.size();)
+                            {
+                                uint32_t n = fifoOracle.ConsumeLocalToHostBytes(
+                                    drain.data() + drained, drain.size() - drained);
+                                if (!n)
+                                    throw std::runtime_error("fifo tail drain failed");
+                                drained += n;
+                            }
+                            for (uint32_t got = 0; got < tail;)
+                            {
+                                uint32_t n = fifoOracle.ConsumeLocalToHostBytes(
+                                    fifoResidual.data() + got, tail - got);
+                                if (!n)
+                                    throw std::runtime_error("fifo tail underflow");
+                                got += n;
+                            }
+                        }
+                        else
+                            break;
+                    }
+                    uint32_t n = std::min<uint32_t>(fifoResidual.size(), v[0] - served);
+                    std::memcpy(data.data() + served, fifoResidual.data(), n);
+                    fifoResidual.erase(fifoResidual.begin(), fifoResidual.begin() + n);
+                    served += n;
+                }
+                if (served != v[0])
+                    throw std::runtime_error("fifo adapter short read");
+                std::vector<uint8_t> expected(v[0]);
+                if (fifoVerify.ConsumeLocalToHostBytes(expected.data(), v[0]) != v[0] ||
+                    std::memcmp(data.data(), expected.data(), v[0]))
+                    throw std::runtime_error("fifo adapter mismatch vs CPU");
+            }
 #else
             std::vector<uint8_t> data(v[0]);
             gs.consumeLocalToHostBytes(data.data(), data.size());

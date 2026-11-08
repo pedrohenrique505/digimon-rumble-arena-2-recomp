@@ -44,11 +44,22 @@ with tempfile.TemporaryDirectory(prefix='dra2-capture-test-') as directory:
     for offset in (0, 4, 16):
         odd24_image[offset:offset+3] = b'\x11\x22\x33'
     odd24_upload = record(3, struct.pack('<QQQQ', (1 << 48) | (1 << 56), 0, 3 | (1 << 32), 0)) + record(4, b'\x11\x22\x33' * 3 + bytes(7))
-    tests += [('odd-24bit-upload', b'DRA2GS02' + record(0, initial) + odd24_upload + record(6, odd24_image), 0),
+    # Local-to-host FIFO: partial byte consumption and sub-qword tail.
+    def reg(addr, value):
+        return record(2, struct.pack('<QQ', addr, value))
+    fifo_upload = record(3, struct.pack('<QQQQ', 1 << 48, 0, 5 | (1 << 32), 0)) + record(4, b'\x11\x22\x33\x44' * 5)
+    fifo_xfer = reg(0x50, 1 << 16) + reg(0x51, 0) + reg(0x52, 5 | (1 << 32)) + reg(0x53, 1)
+    fifo_image = bytearray(initial)
+    for offset in (0, 4, 16, 20, 32):
+        fifo_image[offset:offset+4] = b'\x11\x22\x33\x44'
+    tests += [('fifo-partial-and-tail', b'DRA2GS02' + record(0, initial) + fifo_upload + fifo_xfer + record(8, struct.pack('<I', 6)) + record(8, struct.pack('<I', 14)) + record(6, fifo_image), 0),
+              ('fifo-tail-only', b'DRA2GS02' + record(0, initial) + record(3, struct.pack('<QQQQ', 1 << 48, 0, 3 | (1 << 32), 0)) + record(4, b'\x11\x22\x33\x44' * 3) + fifo_xfer.replace(struct.pack('<Q', 5 | (1 << 32)), struct.pack('<Q', 3 | (1 << 32))) + record(8, struct.pack('<I', 5)) + record(8, struct.pack('<I', 7)) + record(6, bytes(bytearray(b'\x11\x22\x33\x44' * 2 + bytes(8) + b'\x11\x22\x33\x44') + bytes(VRAM - 20))), 0),
+              ('odd-24bit-upload', b'DRA2GS02' + record(0, initial) + odd24_upload + record(6, odd24_image), 0),
               ('gpu-upload-then-masked-write', b'DRA2GS02' + record(0, initial) + wide_upload + masked + record(6, wide_image), 0),
               ('direct-write', b'DRA2GS02' + record(0, initial) + direct + record(6, direct_image), 0),
               ('upload-then-masked-write', b'DRA2GS02' + record(0, initial) + upload + masked + record(6, masked_image), 0)]
     expected = {'odd-24bit-upload': odd24_image, 'gpu-upload-then-masked-write': wide_image, 'native-upload': image, 'direct-write': direct_image,
+                'fifo-partial-and-tail': fifo_image, 'fifo-tail-only': bytearray(b'\x11\x22\x33\x44' * 2 + bytes(8) + b'\x11\x22\x33\x44') + bytes(VRAM - 20),
                 'upload-then-masked-write': masked_image}
     for name, data, code in tests:
         capture = root / (name + '.gs')
