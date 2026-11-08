@@ -10,6 +10,9 @@
 // ainda apontar para a entrada da função, a retomada a executa de novo, em laço.
 
 #include "game_overrides.h"
+#ifdef DRA2_HAS_PARALLEL_GS
+#include "dra2_parallel_gs.h"
+#endif
 #include "ps2_runtime.h"
 #include "ps2_iop_transport.h"
 #include "ps2_runtime_calls.h"
@@ -297,6 +300,9 @@ namespace
 
     void apply(PS2Runtime &runtime)
     {
+#ifdef DRA2_HAS_PARALLEL_GS
+        dra2_parallel_gs::installIfRequested(runtime);
+#endif
         configureDiscImage();
 
         size_t bound = 0;

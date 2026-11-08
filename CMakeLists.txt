@@ -82,6 +82,24 @@ target_include_directories(dra2 PRIVATE "${RT_DIR}/src/lib")
 set_source_files_properties("${DRA2_GENERATED_DIR}/register_functions.cpp"
     PROPERTIES COMPILE_OPTIONS "-O0")
 
+# Etapa 3 (opcional, desligado por padrão): sink shadow paraLLEl-GS.
+# Requer o checkout pinado (tools/build_gs_replay.sh já o prepara em .cache/).
+option(DRA2_ENABLE_PARALLEL_GS "Espelhar GIF no paraLLEl-GS (shadow, DRA2_GS_BACKEND=gpu-shadow)" OFF)
+if(DRA2_ENABLE_PARALLEL_GS)
+    set(DRA2_PARALLEL_GS_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/.cache/parallel-gs-source"
+        CACHE PATH "Checkout pinado do paraLLEl-GS")
+    if(NOT EXISTS "${DRA2_PARALLEL_GS_SOURCE}/gs/gs_interface.hpp")
+        message(FATAL_ERROR "paraLLEl-GS não encontrado em ${DRA2_PARALLEL_GS_SOURCE}: rode tools/build_gs_replay.sh")
+    endif()
+    set(PARALLEL_GS_STANDALONE ON CACHE BOOL "" FORCE)
+    set(GRANITE_AUDIO OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${DRA2_PARALLEL_GS_SOURCE}" parallel-gs EXCLUDE_FROM_ALL)
+    target_sources(dra2 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/runtime/parallel_gs/dra2_parallel_gs.cpp")
+    target_include_directories(dra2 PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/runtime/parallel_gs")
+    target_link_libraries(dra2 PRIVATE parallel-gs)
+    target_compile_definitions(dra2 PRIVATE DRA2_HAS_PARALLEL_GS=1)
+endif()
+
 if(PS2X_ENABLE_DEBUG_UI)
     target_sources(dra2 PRIVATE "${RT_DIR}/src/lib/ps2_debug_panel.cpp")
     target_link_libraries(dra2 PRIVATE rlImGui imgui)
