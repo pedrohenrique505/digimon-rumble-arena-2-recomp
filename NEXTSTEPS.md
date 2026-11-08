@@ -287,3 +287,16 @@ A pendência de SMODE1 registrada acima foi resolvida para os modos TV cobertos.
 A próxima etapa segue sendo validar a imagem e conectar a apresentação à
 janela, com dispositivo/contexto e threads explícitos. Medir novamente scanout
 válido e apresentação antes de atribuir ganho de FPS ao jogo.
+
+## Primeira divergência isolada (08/11)
+
+O primeiro comando divergente da captura V3 anterior foi isolado no registro
+32. O patch 0021 preserva atributos constantes do triângulo na CPU, inclusive
+sob FE_TOWARDZERO; esse prefixo agora é idêntico nos 4 MiB de VRAM CPU/GPU.
+A redução também revelou escrita indevida de profundidade com ZTE=0, corrigida
+separadamente pelo patch 0020. Essa segunda falha não era a causa do registro 32.
+
+Uma captura nova passa nas seis referências CPU; GPU ainda diverge nas seis.
+Próximo passo: isolar a primeira diferença restante nessa captura. As etapas
+de aceite visual e apresentação continuam em progresso. Evidências, testes,
+limites e artefatos: [primeira divergência corrigida](progression/2026-11-08-parallelgs-primeira-divergencia-corrigida.md).

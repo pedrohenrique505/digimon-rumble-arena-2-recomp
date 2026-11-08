@@ -1,5 +1,19 @@
 # Prova de GS acelerado e diagnóstico de desempenho
 
+Continuação mais recente: [primeira divergência isolada e corrigida](../progression/2026-11-08-parallelgs-primeira-divergencia-corrigida.md).
+Os patches 0020/0021 corrigem a referência CPU (escrita Z com ZTE desligado e
+atributos constantes em triângulos). Capturas históricas preservam o resultado
+anterior; use uma aquisição nova para validar a CPU corrigida. O candidato
+continua divergindo em checkpoints e sem aceite visual.
+
+Testes sintéticos, sem recursos do jogo:
+
+```bash
+cmake --build .cache/gs-replay-build --target dra2-gs-test-depth dra2-gs-test-constant-triangle -j3
+.cache/gs-replay-build/dra2-gs-test-depth
+.cache/gs-replay-build/dra2-gs-test-constant-triangle
+```
+
 Esta implementação atende à medição e ao replay das etapas 1 e 2 do
 [NEXTSTEPS](../NEXTSTEPS.md). O jogo continua usando o GS CPU. O executável
 Vulkan é uma prova offline: não conecta a GPU ao EE/IOP nem à janela do jogo.
