@@ -56,3 +56,18 @@ e [implementação pinada](https://github.com/Arntzen-software/parallel-gs/blob/
    adaptador GIF no jogo (etapa 3), em commits pequenos.
 
 Nenhum dado do jogo foi adicionado ao git.
+
+## Resultado
+
+- FIFO local→host no replay: buffer residual preserva bytes entre pedidos
+  arbitrários; a cauda sub-qword (`total % 16`) é reconstruída do oráculo
+  CPU sobre a VRAM sincronizada e cada consumo é conferido byte a byte
+  contra o backend CPU. Testes: consumo 6+14 de 20 bytes e cauda pura de
+  12 bytes em 5+7.
+- Upload IMAGE (GIF tipo 1) com `bits % 64 != 0`: o replay inspeciona as
+  tags do pacote, envia o prefixo ao candidato e roteia o payload pelo
+  fallback CPU já usado nos uploads nativos. Testes: 1 pixel CT32 e
+  3 pixels CT24 via pacote GIF completo.
+- Suíte do replay: 15 casos em cada backend (CPU e Vulkan), todos verdes.
+- Próximo passo: adaptador GIF no jogo (etapa 3), reaproveitando essas
+  duas estratégias; a divergência visual da captura longa segue aberta.

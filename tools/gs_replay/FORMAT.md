@@ -33,7 +33,11 @@ PPM de 640×448 do DISPFB selecionado, antes das heurísticas de apresentação 
 frontend CPU. Upload, submissão e scanout estão no tempo de trabalho; o término
 da GPU é incluído em `sync_seconds`. Não somar tempos de validação às médias de
 execução. O clear HLE usa a rotina CPU sobre VRAM mapeada e mede essa volta completa.
-Leituras local/host são rejeitadas pelo candidato. Escritas diretas usam
+Leituras local/host usam adaptador com buffer residual: o candidato entrega
+qwords de 16 bytes, o consumidor pede bytes arbitrários e a cauda sub-qword é
+reconstruída da VRAM sincronizada, com verificação contra o backend CPU.
+Uploads IMAGE no fluxo GIF com bits não múltiplos de 64 usam o mesmo fallback
+CPU dos uploads nativos. Escritas diretas usam
 `WriteVram` CPU sobre VRAM GPU mapeada, após flush, seguidas de `end_vram_write`.
 Uploads nativos com tamanho em bits não múltiplo de 64 usam transferência CPU
 sobre esse mesmo mapeamento para preservar o último word parcial. O caminho

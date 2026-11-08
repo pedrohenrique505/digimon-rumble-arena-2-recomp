@@ -52,7 +52,8 @@ O adaptador de replay agora cobre escrita direta de VRAM com sincronização e
 fallback para upload nativo com word parcial. Há exportação e comparação visual
 por checkpoint, além de testes CPU/Vulkan. A captura maior continua divergindo
 na imagem: nenhuma aprovação visual nem integração ao jogo foi declarada.
-Leitura FIFO e cobertura de uploads IMAGE parciais permanecem pendentes.
+Leitura FIFO com consumo parcial e uploads IMAGE parciais foram concluídos no replay;
+a integração ao jogo (etapa 3) é o próximo passo.
 Evidências: [diário da continuação](progression/2026-11-08-parallelgs-coerencia-e-checkpoints.md).
 
 ## Sequência de implementação
@@ -136,11 +137,11 @@ apostar só na GPU.
   mapeamento sincronizado e swizzle CPU; validar preservação de alfa após upload GPU.
 - [x] **Concluído no replay:** preservar uploads nativos com word parcial usando
   fallback CPU sincronizado e contador explícito.
-- [ ] **Pendente:** adaptar consumo local/host preservando bytes parciais e
-  tamanho efetivamente consumido. O candidato ainda o rejeita explicitamente.
-- [ ] **Pendente:** cobrir uploads IMAGE parciais no fluxo GIF geral e ampliar
-  a cobertura em capturas reais. O clear HLE tem fallback CPU com ida/volta
-  de VRAM contabilizada.
+- [x] **Concluído no replay:** adaptar consumo local/host preservando bytes parciais e
+  tamanho efetivamente consumido, com buffer residual e cauda sub-qword reconstruída.
+- [x] **Concluído no replay:** cobrir uploads IMAGE parciais no fluxo GIF geral via
+  fallback CPU sobre VRAM sincronizada; falta ampliar a cobertura em capturas reais.
+  O clear HLE tem fallback CPU com ida/volta de VRAM contabilizada.
 
 **Entrega parcial:** prova executável acelerada e ganho múltiplo GS confirmados.
 **Aceite restante:** aprovação visual, cobertura e custos ainda ausentes.
