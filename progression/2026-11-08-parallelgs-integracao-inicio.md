@@ -71,3 +71,27 @@ Nenhum dado do jogo foi adicionado ao git.
 - Suíte do replay: 15 casos em cada backend (CPU e Vulkan), todos verdes.
 - Próximo passo: adaptador GIF no jogo (etapa 3), reaproveitando essas
   duas estratégias; a divergência visual da captura longa segue aberta.
+
+## Etapa 3 iniciada: adaptador no jogo (shadow)
+
+- Patch `0016` (genérico): costura `GSGifSink` no frontend GS. O sink recebe,
+  na ordem, pacotes GIF pós-arbitragem, registradores, uploads nativos,
+  pedidos local→host, clears, escritas diretas, reset e latch. Sem sink
+  instalado, o comportamento é idêntico ao anterior.
+- `runtime/parallel_gs/`: adaptador que dirige o paraLLEl-GS em modo shadow.
+  O backend CPU continua autoritativo para VRAM, sinais SIGNAL/FINISH e
+  apresentação (raylib); a GPU espelha o fluxo com as mesmas estratégias do
+  replay (IMAGE parcial e escrita direta via CPU sobre VRAM mapeada, FIFO
+  local→host consumido com buffer residual apenas para manter o candidato
+  em sincronia, latch com `vsync` do candidato sem swap de janela).
+- Seleção: build `DRA2_ENABLE_PARALLEL_GS=ON` (padrão OFF) e ambiente
+  `DRA2_GS_BACKEND=gpu-shadow` (padrão CPU). Sem Vulkan, o sink se desliga
+  com aviso e o jogo segue no CPU.
+- Validação desta rodada: configuração CMake com a opção ligada e compilação
+  das unidades do adaptador e do override. O executável completo não foi
+  religado nem executado nesta rodada; apresentação GPU na janela, sinais a
+  partir da GPU e a promoção a backend autoritativo continuam pendentes.
+- Nota: `tools/apply_upstream_patches.sh` não é mais idempotente neste clone
+  porque os patches 0001–0015 já estão commitados no branch `dra2-patches`;
+  a verificação reversa falha para todos, não só para o 0016. Corrigir o
+  script fica fora desta rodada.

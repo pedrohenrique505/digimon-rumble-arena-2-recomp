@@ -22,7 +22,7 @@ com o estado indicado quando já existe implementação parcial.
 | --- | --- | --- | --- |
 | 1 — Medição e teto | **Em progresso** | Contadores exclusivos, modo sem rasterização, captura/replay VU, 20 execuções sem debugger | Estabilizar/comprovar todos os cenários, apresentações únicas, carregamentos e feedback de VRAM |
 | 2 — Prova GS acelerado | **Em progresso** | Avaliação paraLLEl-GS, captura real, replay CPU/Vulkan e ganho GS de 37,25× em cinco pares | Aprovar equivalência visual e concluir cobertura e custos da apresentação |
-| 3 — Integrar GPU ao jogo | **Não iniciada** | Fronteira de integração identificada na etapa 2 | Adaptador GIF, coerência VRAM, sinais, seleção CPU/GPU e janela Vulkan |
+| 3 — Integrar GPU ao jogo | **Em progresso** | Costura GSGifSink (patch 0016), adaptador shadow no jogo com FIFO/IMAGE do replay, seleção DRA2_GS_BACKEND | Apresentação GPU na janela, sinais a partir da GPU e promoção a backend autoritativo |
 | 4 — Acelerar VU1 | **Não iniciada** | Instrumentação/replay preparatório pertence à etapa 1 | Inventário dos programas caros, substituição/recompilação e validação diferencial |
 | 5 — Validar partida e orçamento | **Não iniciada** | Nenhuma validação de partida nesta rodada | Partida completa, áudio/entrada, cadência original e orçamento de quadro |
 
@@ -148,12 +148,14 @@ apostar só na GPU.
 Não escrever um GS do zero nesta etapa nem chamar o speedup do replay de
 speedup do jogo.
 
-### 3. Integrar o backend escolhido ao jogo — Não iniciada
+### 3. Integrar o backend escolhido ao jogo — Em progresso
 
-- [ ] Implementar o adaptador de GIF pós-arbitragem para o paraLLEl-GS, antes
-  da decodificação em primitivas. Essa é a conexão que leva o ganho do replay
-  ao caminho de renderização do jogo.
-- [ ] Adicionar seleção explícita CPU/GPU; manter CPU como referência e fallback.
+- [x] **Concluído (shadow):** implementar o adaptador de GIF pós-arbitragem para
+  o paraLLEl-GS, antes da decodificação em primitivas (patch 0016 `GSGifSink` +
+  `runtime/parallel_gs/`). O CPU continua autoritativo; a GPU espelha o fluxo.
+- [x] **Concluído:** adicionar seleção explícita CPU/GPU (`DRA2_GS_BACKEND=cpu`
+  padrão ou `gpu-shadow`, build `DRA2_ENABLE_PARALLEL_GS=ON`); CPU é referência
+  e fallback.
 - [ ] Conectar reset, uploads, transferências local/local e local/host, CLUT,
   `TEXFLUSH`, ordenação GIF, interrupções e sincronizações GS usadas pelo jogo.
 - [ ] Definir quem possui cada região da VRAM, como alterações ficam visíveis
