@@ -272,3 +272,18 @@ sem reutilizar um modo anterior. Não há tabela completa de modos BIOS.
 A análise e a validação ao vivo estão no
 [diário do CRT e da captura V3](../progression/2026-11-08-parallelgs-crt-e-captura-v3.md).
 Apresentação na janela e equivalência visual continuam pendentes.
+
+### Localizar a primeira divergência
+
+```bash
+python3 tools/find_gs_first_difference.py captura.gs .cache/primeira-diferenca
+```
+
+A ferramenta percorre prefixos em ordem, sem busca binária (desenhos posteriores
+podem apagar diferenças), e compara os 4 MiB produzidos pelos dois replayers.
+O diretório de saída deve ser novo. Preserva `before.gs`, `after.gs`, VRAMs e
+`result.json` com hash da captura, índice do registro e pares de bytes distintos.
+Cabeçalho e payload de upload nativo são indivisíveis. Códigos de saída dos
+replayers sem referência são aceitos apenas quando a VRAM completa foi exportada.
+O resultado localiza uma diferença entre implementações; não decide qual delas
+corresponde ao hardware. Capturas e saídas devem permanecer fora do git.

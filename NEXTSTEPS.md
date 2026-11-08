@@ -300,3 +300,13 @@ Uma captura nova passa nas seis referências CPU; GPU ainda diverge nas seis.
 Próximo passo: isolar a primeira diferença restante nessa captura. As etapas
 de aceite visual e apresentação continuam em progresso. Evidências, testes,
 limites e artefatos: [primeira divergência corrigida](progression/2026-11-08-parallelgs-primeira-divergencia-corrigida.md).
+
+## Segunda divergência localizada (08/11)
+
+A ferramenta `tools/find_gs_first_difference.py` localizou a primeira diferença
+restante da captura nova no registro 38: prefixo até 37 idêntico nos 4 MiB,
+1.344 bytes divergentes após um pacote de sprites. A causa ainda está aberta;
+a primeira redução introduziu diferenças adicionais. Uma segunda preserva
+todo o estado anterior e reproduz 64 bytes do mesmo padrão com um único
+sprite. Próximo passo é localizar esses pixels/texels e confirmar a causa
+antes de criar caso sintético e patch. [Evidências e limites](progression/2026-11-08-parallelgs-segunda-divergencia-isolada.md).
