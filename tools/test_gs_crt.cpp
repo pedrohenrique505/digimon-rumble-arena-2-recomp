@@ -2,6 +2,7 @@
 #include "ps2_runtime.h"
 #include "ps2_runtime_macros.h"
 #include "ps2_syscalls.h"
+#include "ps2_stubs.h"
 #include <cstdio>
 #include <stdexcept>
 
@@ -17,9 +18,9 @@ try
     PS2Runtime runtime;
     R5900Context ctx{};
     auto select = [&](unsigned mode, unsigned interlace, unsigned frame) {
-        SET_GPR_U32(&ctx, 4, interlace);
-        SET_GPR_U32(&ctx, 5, mode);
-        SET_GPR_U32(&ctx, 6, frame);
+        SET_GPR_U32((&ctx), 4, interlace);
+        SET_GPR_U32((&ctx), 5, mode);
+        SET_GPR_U32((&ctx), 6, frame);
         ps2_syscalls::SetGsCrt(nullptr, &ctx, &runtime);
     };
     select(0x02, 1, 1);
@@ -40,7 +41,28 @@ try
     select(0x50, 0, 1);
     if (gs.smode1 != 0)
         throw std::runtime_error("unsupported CRT mode retained a stale analog mode");
-    std::puts("CRT HLE NTSC/PAL/transitions OK");
+    if (!runtime.memory().initialize())
+        throw std::runtime_error("memory initialization failed");
+    auto resetGraph = [&](unsigned mode, unsigned video, unsigned interlace, unsigned frame) {
+        SET_GPR_U32((&ctx), 4, mode);
+        SET_GPR_U32((&ctx), 5, interlace);
+        SET_GPR_U32((&ctx), 6, video);
+        SET_GPR_U32((&ctx), 7, frame);
+        ps2_stubs::sceGsResetGraph(runtime.memory().getRDRAM(), &ctx, &runtime);
+        if (GPR_U32((&ctx), 4) != mode || GPR_U32((&ctx), 5) != interlace ||
+            GPR_U32((&ctx), 6) != video || GPR_U32((&ctx), 7) != frame)
+            throw std::runtime_error("ResetGraph clobbered argument registers");
+    };
+    resetGraph(0, 0x02, 1, 0);
+    if (((gs.smode1 >> 13) & 3) != 2 || gs.smode2 != 1)
+        throw std::runtime_error("sceGsResetGraph bypassed CRT HLE");
+    resetGraph(1, 0x03, 0, 0);
+    if (((gs.smode1 >> 13) & 3) != 2 || gs.smode2 != 1)
+        throw std::runtime_error("draw reset unexpectedly changed video mode");
+    resetGraph(5, 0x03, 0, 1);
+    if (((gs.smode1 >> 13) & 3) != 3 || gs.smode2 != 2)
+        throw std::runtime_error("sceGsResetGraph mode 5 did not change CRT mode");
+    std::puts("CRT syscall and ResetGraph NTSC/PAL/transitions OK");
     return 0;
 }
 catch (const std::exception &e)
