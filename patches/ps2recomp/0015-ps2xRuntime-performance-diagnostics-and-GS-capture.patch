@@ -1,3 +1,24 @@
+From eb0537f2843e8d942c7f172499ef3e6ef3cba910 Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sun, 8 Nov 2026 14:37:57 -0300
+Subject: [PATCH] ps2xRuntime: diagnostico de desempenho e captura GS (0015)
+
+---
+ ps2xRuntime/include/runtime/ps2_gs_capture.h |  75 ++++++++++
+ ps2xRuntime/include/runtime/ps2_perf.h       | 146 +++++++++++++++++++
+ ps2xRuntime/include/runtime/ps2_vu1.h        |   2 +
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp   |   3 +
+ ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp    |   4 +-
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp       |  39 +++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp          |   7 +
+ ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp      | 120 +++++++++++++++
+ 8 files changed, 395 insertions(+), 1 deletion(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_gs_capture.h
+ create mode 100644 ps2xRuntime/include/runtime/ps2_perf.h
+
+diff --git a/ps2xRuntime/include/runtime/ps2_gs_capture.h b/ps2xRuntime/include/runtime/ps2_gs_capture.h
+new file mode 100644
+index 0000000..7f81536
 --- /dev/null
 +++ b/ps2xRuntime/include/runtime/ps2_gs_capture.h
 @@ -0,0 +1,75 @@
@@ -76,6 +97,9 @@
 +    }
 +};
 +} // namespace gscapture
+diff --git a/ps2xRuntime/include/runtime/ps2_perf.h b/ps2xRuntime/include/runtime/ps2_perf.h
+new file mode 100644
+index 0000000..a354ce7
 --- /dev/null
 +++ b/ps2xRuntime/include/runtime/ps2_perf.h
 @@ -0,0 +1,146 @@
@@ -225,9 +249,11 @@
 +    std::fflush(out);
 +}
 +} // namespace ps2perf
+diff --git a/ps2xRuntime/include/runtime/ps2_vu1.h b/ps2xRuntime/include/runtime/ps2_vu1.h
+index 67c8184..0b43270 100644
 --- a/ps2xRuntime/include/runtime/ps2_vu1.h
 +++ b/ps2xRuntime/include/runtime/ps2_vu1.h
-@@ -59,6 +59,8 @@
+@@ -59,6 +59,8 @@ public:
                  GS &gs, PS2Memory *memory = nullptr,
                  uint32_t top = 0, uint32_t itop = 0, uint32_t maxCycles = 65536);
  
@@ -236,6 +262,8 @@
      VU1State &state() { return m_state; }
      const VU1State &state() const { return m_state; }
  
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index c2a95de..30737b0 100644
 --- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
 +++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
 @@ -1,3 +1,4 @@
@@ -243,7 +271,7 @@
  #include "runtime/ee_scheduler.h"
  
  #include "ps2_log.h"
-@@ -159,6 +160,7 @@
+@@ -159,6 +160,7 @@ void EeScheduler::run()
  
      while (!m_stopRequested.load(std::memory_order_acquire))
      {
@@ -251,7 +279,7 @@
          processPendingEvents();
          if (m_stopRequested.load(std::memory_order_acquire))
          {
-@@ -296,6 +298,7 @@
+@@ -296,6 +298,7 @@ void EeScheduler::run()
          {
              m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
              m_guestExecuting.store(true, std::memory_order_release);
@@ -259,6 +287,8 @@
              function(m_rdram, &context, &m_runtime);
              m_guestExecuting.store(false, std::memory_order_release);
              m_insideInterrupt = false;
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index 0d65291..1a1a9c6 100644
 --- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
 +++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
 @@ -1,3 +1,4 @@
@@ -266,7 +296,7 @@
  #include "runtime/ps2_dbgstat.h"
  #include "runtime/gs/gs_cpu_backend.h"
  #include "runtime/gs/ps2_gs_common.h"
-@@ -554,7 +555,7 @@
+@@ -554,7 +555,7 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
      std::lock_guard<std::mutex> lock(m_mutex);
      if (!m_vram || batch.vertexCount == 0u)
          return;
@@ -275,7 +305,7 @@
  }
  
  void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
-@@ -1720,6 +1721,7 @@
+@@ -1720,6 +1721,7 @@ uint32_t GSCpuBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
  
  bool GSCpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
  {
@@ -283,6 +313,8 @@
      std::lock_guard<std::mutex> lock(m_mutex);
      if (!m_vram || context.frame.fbw == 0u)
          return false;
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 7d6403a..42cd0cd 100644
 --- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
 +++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
 @@ -1,3 +1,5 @@
@@ -291,7 +323,7 @@
  #include "runtime/ps2_dbgstat.h"
  #include "runtime/gs/gs_frontend.h"
  #include "runtime/gs/gs_cpu_backend.h"
-@@ -114,6 +116,7 @@
+@@ -114,6 +116,7 @@ GS::GS()
  
  void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
  {
@@ -299,7 +331,7 @@
      m_localMemoryStorage = vram;
      m_localMemorySize = vramSize;
      m_privRegs = privRegs;
-@@ -126,6 +129,7 @@
+@@ -126,6 +129,7 @@ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
  void GS::reset()
  {
      std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
@@ -307,7 +339,7 @@
      std::memset(m_ctx, 0, sizeof(m_ctx));
      m_prim = {};
      m_primRegister = {};
-@@ -527,6 +531,15 @@
+@@ -527,6 +531,15 @@ GSPresentationRequest GS::buildPresentationRequestUnlocked() const
  
  void GS::latchHostPresentationFrame()
  {
@@ -323,7 +355,7 @@
      GSPresentationRequest request{};
      {
          std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
-@@ -549,6 +562,13 @@
+@@ -549,6 +562,13 @@ void GS::latchHostPresentationFrame()
              m_backend->Flush();
              m_backend->Sync(GSSyncReason::Presentation);
              frame = m_backend->Present(request);
@@ -337,7 +369,7 @@
          }
      }
  
-@@ -641,10 +661,12 @@
+@@ -641,10 +661,12 @@ bool GS::copyLatchedHostPresentationFrame(std::vector<uint8_t> &outPixels,
  
  void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
  {
@@ -350,7 +382,7 @@
      if (tryProcessNativeImageUploadPacket(data, sizeBytes))
          return;
  
-@@ -744,6 +766,7 @@
+@@ -744,6 +766,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
  
  bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
  {
@@ -358,7 +390,7 @@
      std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
      if (!data || sizeBytes < 16u || !m_backend)
          return false;
-@@ -751,6 +774,7 @@
+@@ -751,6 +774,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
      if (!validatePackedGifPacket(data, sizeBytes))
          return false;
  
@@ -366,7 +398,7 @@
      const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
                                                  {
          m_curQ = 1.0f;
-@@ -793,7 +817,11 @@
+@@ -793,7 +817,11 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
                             const uint8_t *data,
                             uint32_t sizeBytes)
  {
@@ -378,7 +410,7 @@
      uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
  }
  
-@@ -1071,7 +1099,10 @@
+@@ -1071,7 +1099,10 @@ void GS::writeRegisterPacked(uint8_t regDesc, uint64_t lo, uint64_t hi)
  
  void GS::writeRegister(uint8_t regAddr, uint64_t value)
  {
@@ -389,7 +421,7 @@
      writeRegisterUnlocked(regAddr, value);
  }
  
-@@ -1630,18 +1661,24 @@
+@@ -1630,18 +1661,24 @@ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
  bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
  {
      std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
@@ -414,7 +446,7 @@
      return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
  }
  
-@@ -1683,6 +1720,8 @@
+@@ -1683,6 +1720,8 @@ uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint
  void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
  {
      std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
@@ -423,6 +455,8 @@
      if (m_backend)
          m_backend->WriteVram(psm, base, bw, x, y, value);
  }
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 9b9661e..24cdc27 100644
 --- a/ps2xRuntime/src/lib/ps2_runtime.cpp
 +++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
 @@ -1,3 +1,4 @@
@@ -430,7 +464,7 @@
  #include "runtime/ps2_dbgstat.h"
  #include "runtime/gs/ps2_gs_memory.h"
  #include <cstdio>
-@@ -597,6 +598,7 @@
+@@ -597,6 +598,7 @@ bool PS2Runtime::canBindIopRpc(uint32_t sid) const noexcept
  
  ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
  {
@@ -438,7 +472,7 @@
      auto scope = m_iopHost->enterCall(ctx, rdram);
      request.callToken = scope.token();
      return m_iopSubsystem->handleRpc(request);
-@@ -604,12 +606,14 @@
+@@ -604,12 +606,14 @@ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx,
  
  void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
  {
@@ -453,7 +487,7 @@
      m_iopSubsystem->runEeCycles(eeCycles);
  }
  
-@@ -1403,6 +1407,7 @@
+@@ -1403,6 +1407,7 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
          return false;
      }
  
@@ -461,7 +495,7 @@
      RecompiledFunction targetFn = lookupFunction(targetPc);
      const uint32_t entryPc = ctx->pc;
      const uint64_t checkpointGeneration = m_eeScheduler ? m_eeScheduler->checkpointGeneration() : 0u;
-@@ -2489,6 +2494,8 @@
+@@ -2489,6 +2494,8 @@ void PS2Runtime::run()
  
              }
          });
@@ -470,6 +504,8 @@
          uint32_t presentWidth = FB_WIDTH;
          uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
          UploadFrame(frameTex, this, presentWidth, presentHeight);
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 07d4c4b..b741108 100644
 --- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
 +++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
 @@ -1,3 +1,9 @@
@@ -482,7 +518,7 @@
  #include "runtime/ps2_dbgstat.h"
  #include "runtime/ps2_vu1.h"
  #include "runtime/gs/ps2_gif_arbiter.h"
-@@ -915,11 +921,33 @@
+@@ -915,11 +921,33 @@ void VU1Interpreter::progressXgkick()
      }
  }
  
@@ -516,7 +552,7 @@
      if (m_activeMemory)
          m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
      else if (m_activeGs)
-@@ -1557,7 +1585,12 @@
+@@ -1557,7 +1585,12 @@ VU1Interpreter::DecodedInstructionPair VU1Interpreter::getDecodedInstructionPair
                                  ((m_unit == Unit::VU1 && vuCode == memory->getVU1Code()) ||
                                   (m_unit == Unit::VU0 && vuCode == memory->getVU0Code()));
      if (!trackedVu1Code)
@@ -529,7 +565,7 @@
  
      const uint64_t generation = m_unit == Unit::VU1 ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration();
      if (!m_decodedCodeCacheValid ||
-@@ -1626,6 +1659,25 @@
+@@ -1626,6 +1659,25 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
                           uint8_t *vuData, uint32_t dataSize,
                           GS &gs, PS2Memory *memory, uint32_t maxCycles)
  {
@@ -555,7 +591,7 @@
      m_activeVuData = vuData;
      m_activeVuDataSize = dataSize;
      m_activeGs = &gs;
-@@ -1835,6 +1887,74 @@
+@@ -1835,6 +1887,74 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
          m_pendingHaltT = false;
      }
      m_state.cycles = m_cycle;
@@ -630,3 +666,6 @@
 +                (unsigned long long)bytes);
 +    return 0;
 +}
+-- 
+2.56.0
+

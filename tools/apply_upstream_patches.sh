@@ -7,6 +7,15 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UP="${PS2RECOMP_DIR:-$ROOT/external/PS2Recomp}"
 for p in "$ROOT"/patches/ps2recomp/*.patch; do
   [ -e "$p" ] || continue
+  # Um patch posterior pode modificar um arquivo criado por um patch anterior:
+  # nesse caso nem o reverse -C0 reconhece o conteúdo original inteiro.
+  # Commits do nosso branch local mantêm a identidade do format-patch.
+  read -r patch_marker patch_commit patch_rest < "$p"
+  if [[ "$patch_marker" == From && "$patch_commit" =~ ^[0-9a-f]{40}$ ]] &&
+      git -C "$UP" merge-base --is-ancestor "$patch_commit" HEAD 2>/dev/null; then
+    echo "já aplicado (commit): $(basename "$p")"
+    continue
+  fi
   # Patches posteriores podem alterar somente o contexto de um patch anterior.
   # Na verificação reversa, compare as linhas alteradas sem exigir esse contexto.
   if git -C "$UP" apply --reverse --check -C0 "$p" 2>/dev/null; then
