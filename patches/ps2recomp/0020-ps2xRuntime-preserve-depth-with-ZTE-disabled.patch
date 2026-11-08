@@ -1,0 +1,36 @@
+From f81f2299ea833508aa8c45bb372bc4279160e8db Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sun, 8 Nov 2026 16:15:45 -0300
+Subject: [PATCH] fix: preserve depth when GS TEST.ZTE is disabled
+
+---
+ ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index 1a1a9c6..8d921fe 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -887,8 +887,8 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
+         return;
+     }
+ 
+-    // TEST.ZTE (bit 16) = 0 desliga o teste de Z: todo pixel passa, como no PCSX2
+-    // (ZTE=0 vira ZTST_ALWAYS). Sem isso, ZTE=0 com ZTST=0 (NEVER) descartava tudo.
++    // With TEST.ZTE=0, bypass comparison and leave depth unchanged, as in
++    // PCSX2's software renderer and paraLLEl-GS. ZTST only applies with ZTE=1.
+     const bool zTestEnabled = ((ctx.test >> 16) & 1u) != 0u;
+     const uint32_t ztestMethod = zTestEnabled ? static_cast<uint32_t>((ctx.test >> 17) & 3u) : 1u;
+     const bool alphaBlendEnabled = state.prim.abe;
+@@ -1019,7 +1019,7 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
+         WriteVramUnlocked(fpsm, fbp, fbw, x, y, pixel);
+     }
+ 
+-    if (writeMask.writeDepth && !ctx.zbuf.zmask)
++    if (zTestEnabled && writeMask.writeDepth && !ctx.zbuf.zmask)
+     {
+         WriteVramUnlocked(zpsm, zbp, fbw, x, y, z);
+     }
+-- 
+2.56.0
+
