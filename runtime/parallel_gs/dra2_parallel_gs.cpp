@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 namespace
 {
@@ -96,6 +97,7 @@ public:
 
     void onGifPacket(const uint8_t *data, uint32_t sizeBytes) override
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         // Mesma inspeção de tags do replay: IMAGE parcial vai pelo fallback.
@@ -153,6 +155,7 @@ public:
 
     void onRegister(uint8_t regAddr, uint64_t value) override
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         if (regAddr >= 0x50 && regAddr <= 0x53)
@@ -165,12 +168,14 @@ public:
             m_fifoQwords = m_fifoTotal / 16;
             m_fifoResidual.clear();
             m_fifoTailLoaded = false;
+            m_fifoOracleReady = false;
         }
     }
 
     void onNativeUpload(uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg,
                         uint64_t trxdir, const uint8_t *data, uint32_t sizeBytes) override
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         const uint64_t regs[4] = {bitbltbuf, trxpos, trxreg, trxdir};
@@ -196,6 +201,7 @@ public:
 
     void onLocalToHostRequest(uint32_t maxBytes) override
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         // Consome do FIFO GPU apenas para manter o estado do candidato em
@@ -218,10 +224,50 @@ public:
                     const uint32_t tail = m_fifoTotal % 16;
                     if (!tail)
                         break;
+                    // Cauda sub-qword: o candidato só entrega qwords. Reconstrói
+                    // do oráculo CPU sobre a VRAM GPU sincronizada (replay).
+                    if (!m_fifoOracleReady)
+                    {
+                        m_gpu.flush();
+                        const auto *vram = static_cast<const uint8_t *>(m_gpu.map_vram_read(0, kVram));
+                        m_fifoOracleVram.assign(vram, vram + kVram);
+                        GSTransferCommand cmd{};
+                        cmd.bitbltbuf.sbp = m_xferRegs[0] & 0x3fff;
+                        cmd.bitbltbuf.sbw = (m_xferRegs[0] >> 16) & 0x3f;
+                        cmd.bitbltbuf.spsm = (m_xferRegs[0] >> 24) & 0x3f;
+                        cmd.bitbltbuf.dbp = (m_xferRegs[0] >> 32) & 0x3fff;
+                        cmd.bitbltbuf.dbw = (m_xferRegs[0] >> 48) & 0x3f;
+                        cmd.bitbltbuf.dpsm = (m_xferRegs[0] >> 56) & 0x3f;
+                        cmd.trxpos.ssax = m_xferRegs[1] & 0x7ff;
+                        cmd.trxpos.ssay = (m_xferRegs[1] >> 16) & 0x7ff;
+                        cmd.trxpos.dsax = (m_xferRegs[1] >> 32) & 0x7ff;
+                        cmd.trxpos.dsay = (m_xferRegs[1] >> 48) & 0x7ff;
+                        cmd.trxpos.dir = (m_xferRegs[1] >> 59) & 3;
+                        cmd.trxreg.rrw = m_xferRegs[2] & 0xfff;
+                        cmd.trxreg.rrh = (m_xferRegs[2] >> 32) & 0xfff;
+                        cmd.direction = 1;
+                        m_fifoOracle.Initialize(m_fifoOracleVram.data(), kVram);
+                        m_fifoOracle.BeginTransfer(cmd);
+                        m_fifoOracleReady = true;
+                    }
                     m_fifoResidual.assign(tail, 0);
-                    m_gpu.flush();
-                    const auto *vram = static_cast<const uint8_t *>(m_gpu.map_vram_read(0, kVram));
-                    (void)vram; // cauda validada no replay; shadow não serve o EE
+                    std::vector<uint8_t> drain(m_fifoTotal - tail);
+                    for (uint32_t drained = 0; drained < drain.size();)
+                    {
+                        uint32_t n = m_fifoOracle.ConsumeLocalToHostBytes(
+                            drain.data() + drained, drain.size() - drained);
+                        if (!n)
+                            break;
+                        drained += n;
+                    }
+                    for (uint32_t got = 0; got < tail;)
+                    {
+                        uint32_t n = m_fifoOracle.ConsumeLocalToHostBytes(
+                            m_fifoResidual.data() + got, tail - got);
+                        if (!n)
+                            break;
+                        got += n;
+                    }
                 }
                 else
                     break;
@@ -237,6 +283,7 @@ public:
 
     void onClear(uint32_t contextIndex, uint32_t rgba) override
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         auto &state = m_gpu.get_register_state().ctx[contextIndex != 0];
@@ -262,6 +309,7 @@ public:
     void onDirectWrite(uint32_t psm, uint32_t base, uint32_t bw,
                        uint32_t x, uint32_t y, uint32_t value) override
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         m_gpu.flush();
@@ -274,12 +322,14 @@ public:
 
     void onReset() override
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (m_ready)
             resetGpu();
     }
 
     void onLatch() override
     {
+        std::lock_guard<std::mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         const GSRegisters &priv = m_runtime.memory().gs();
@@ -303,6 +353,12 @@ public:
         m_gpu.flush();
         m_device.next_frame_context();
         m_stats.latches++;
+        if (m_stats.latches % 300 == 0)
+            std::fprintf(stderr,
+                         "[dra2-gs] shadow latches=%llu gif=%llu nativeFallbacks=%llu fifoReq=%llu fifoBytes=%llu\n",
+                         (unsigned long long)m_stats.latches, (unsigned long long)m_stats.gifPackets,
+                         (unsigned long long)m_stats.nativeFallbacks, (unsigned long long)m_stats.fifoRequests,
+                         (unsigned long long)m_stats.fifoBytes);
     }
 
     struct Stats { uint64_t gifPackets = 0, nativeFallbacks = 0, fifoRequests = 0, fifoBytes = 0, latches = 0; } m_stats;
@@ -313,9 +369,13 @@ private:
     Vulkan::Device m_device;
     ParallelGS::GSInterface m_gpu;
     bool m_ready = false, m_failed = false;
+    std::mutex m_mutex;
     uint64_t m_xferRegs[4] = {};
     uint32_t m_fifoTotal = 0, m_fifoQwords = 0;
     std::vector<uint8_t> m_fifoResidual;
+    std::vector<uint8_t> m_fifoOracleVram;
+    GSCpuBackend m_fifoOracle;
+    bool m_fifoOracleReady = false;
     bool m_fifoTailLoaded = false;
 };
 ShadowSink *g_sink = nullptr;
