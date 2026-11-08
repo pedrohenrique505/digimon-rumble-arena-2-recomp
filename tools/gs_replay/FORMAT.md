@@ -87,3 +87,14 @@ esses dois contadores são zero, pois não há chamada ao vsync Vulkan.
 O HLE atual preenche SMODE1 para CRT IDs `0x02`/`0x03` (NTSC/PAL); não emula
 todos os modos BIOS. `sceGsResetGraph` delega ao mesmo HLE nos modos 0 e 5.
 Capturar o valor derivado pelo HLE não prova equivalência ao BIOS original.
+
+### Localização física das diferenças
+
+Com `--checkpoints`, cada JSON inclui `vram_page_size: 8192` e
+`vram_page_differences`, uma lista de 512 contagens de bytes diferentes contra
+a referência capturada. O índice é a página física: o intervalo de bytes é
+`[índice * 8192, (índice + 1) * 8192)`. A soma deve ser `different_bytes`.
+Isso abrange os 4 MiB, inclusive alfa, profundidade e regiões fora do DISPFB.
+Não atribui propriedade à página: texturas e buffers podem compartilhar VRAM.
+A comparação adicional fica em `validation_seconds`, somente quando solicitada.
+Não há mudança no formato da captura nem na execução dos comandos GS.
