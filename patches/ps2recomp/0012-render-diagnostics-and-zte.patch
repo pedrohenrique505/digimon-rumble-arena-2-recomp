@@ -1,0 +1,221 @@
+From d2d93d52bd630d962a0c9932cec37790c7d84fef Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sat, 7 Nov 2026 19:45:54 -0300
+Subject: [PATCH] ps2xRuntime: respeitar ZTE e preservar diagnosticos do render
+
+---
+ ps2xRuntime/include/runtime/ps2_dbgstat.h    | 11 ++++
+ ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp    | 11 +++-
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp       | 12 +++++
+ ps2xRuntime/src/lib/ps2_runtime.cpp          | 55 ++++++++++++++++++++
+ ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp |  7 +++
+ ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp      |  2 +
+ 6 files changed, 96 insertions(+), 2 deletions(-)
+ create mode 100644 ps2xRuntime/include/runtime/ps2_dbgstat.h
+
+diff --git a/ps2xRuntime/include/runtime/ps2_dbgstat.h b/ps2xRuntime/include/runtime/ps2_dbgstat.h
+new file mode 100644
+index 0000000..b2eaadd
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_dbgstat.h
+@@ -0,0 +1,11 @@
++#pragma once
++// Contadores de diagnóstico (temporários, dra2): impressos no [run:tick].
++#include <atomic>
++#include <cstdint>
++namespace dbgstat
++{
++    inline std::atomic<uint64_t> vifDirect{0}, vifUnpack{0}, vifMscal{0}, vifMscnt{0}, vifMpg{0}, vifCmds{0};
++    inline std::atomic<uint64_t> xgkick{0}, draws{0}, drawsTex{0}, path1{0}, path2{0}, path3{0};
++    inline std::atomic<uint64_t> drawsFbp[512];
++    inline std::atomic<int64_t> primBudget{0}, gifBudget{0};
++}
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index f0ad507..c509a21 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -1,3 +1,4 @@
++#include "runtime/ps2_dbgstat.h"
+ #include "runtime/gs/gs_cpu_backend.h"
+ #include "runtime/gs/ps2_gs_common.h"
+ #include "runtime/gs/ps2_gs_psmct16.h"
+@@ -714,9 +715,12 @@ void GSCpuBackend::DrawPrimitive(const GSPrimitiveBatch &batch)
+     const auto &ctx = state.context;
+     PS2_IF_AGRESSIVE_LOGS({
+         const uint32_t primitiveIndex = s_debugPrimitiveCount.fetch_add(1u, std::memory_order_relaxed);
+-        if (primitiveIndex < 64u)
++        if (primitiveIndex < 64u || dbgstat::primBudget.fetch_sub(1, std::memory_order_relaxed) > 0)
+         {
+             std::cout << "[gs:prim] idx=" << primitiveIndex
++                      << " fbmsk=0x" << std::hex << ctx.frame.fbmsk << " zbp=" << std::dec << ctx.zbuf.zbp
++                      << " zpsm=" << static_cast<uint32_t>(ctx.zbuf.psm) << " zmask=" << ctx.zbuf.zmask
++                      << " z0=" << batch.vertices[0].z
+                       << " type=" << static_cast<uint32_t>(state.prim.type)
+                       << " tme=" << static_cast<uint32_t>(state.prim.tme)
+                       << " abe=" << static_cast<uint32_t>(state.prim.abe)
+@@ -877,7 +881,10 @@ void GSCpuBackend::WritePixel(const GSDrawState &state, int x, int y, int z, uin
+         return;
+     }
+ 
+-    const uint32_t ztestMethod = static_cast<uint32_t>((ctx.test >> 17) & 3u);
++    // TEST.ZTE (bit 16) = 0 desliga o teste de Z: todo pixel passa, como no PCSX2
++    // (ZTE=0 vira ZTST_ALWAYS). Sem isso, ZTE=0 com ZTST=0 (NEVER) descartava tudo.
++    const bool zTestEnabled = ((ctx.test >> 16) & 1u) != 0u;
++    const uint32_t ztestMethod = zTestEnabled ? static_cast<uint32_t>((ctx.test >> 17) & 3u) : 1u;
+     const bool alphaBlendEnabled = state.prim.abe;
+     const bool preserveDestinationAlpha = writeMask.writeRgb && !writeMask.writeAlpha && fpsm == GS_PSM_CT32;
+     const bool destinationAlphaTestNeedsRead = ((ctx.test >> 14) & 0x1u) != 0u && (fpsm == GS_PSM_CT32 || fpsm == GS_PSM_CT16 || fpsm == GS_PSM_CT16S);
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 9281d5f..7d6403a 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1,3 +1,4 @@
++#include "runtime/ps2_dbgstat.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/gs_cpu_backend.h"
+ #include "ps2_log.h"
+@@ -684,6 +685,10 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+             nreg = 16;
+ 
+         recordGifTagDebugEventUnlocked(sizeBytes, nloop, flg, nreg);
++        if (dbgstat::gifBudget.fetch_sub(1, std::memory_order_relaxed) > 0)
++            std::cout << "[dbg:giftag] path=generic size=" << sizeBytes << " lo=0x" << std::hex << tagLo << " hi=0x" << tagHi << std::dec
++                      << " nloop=" << nloop << " flg=" << (int)flg << " nreg=" << nreg << " pre=" << ((tagLo >> 46) & 1)
++                      << " prim=0x" << std::hex << ((tagLo >> 47) & 0x7FF) << std::dec << " prmodecont=" << m_prmodecont << std::endl;
+ 
+         bool pre = ((tagLo >> 46) & 1) != 0;
+         if (pre)
+@@ -751,6 +756,10 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+         m_curQ = 1.0f;
+ 
+         recordGifTagDebugEventUnlocked(sizeBytes, tag.nloop, GIF_FMT_PACKED, tag.nreg);
++        if (dbgstat::gifBudget.fetch_sub(1, std::memory_order_relaxed) > 0)
++            std::cout << "[dbg:giftag] path=native size=" << sizeBytes << " lo=0x" << std::hex << tag.lo << std::dec
++                      << " nloop=" << tag.nloop << " nreg=" << tag.nreg << " pre=" << ((tag.lo >> 46) & 1)
++                      << " prim=0x" << std::hex << ((tag.lo >> 47) & 0x7FF) << std::dec << " prmodecont=" << m_prmodecont << std::endl;
+ 
+         const bool pre = ((tag.lo >> 46u) & 1u) != 0u;
+         if (pre)
+@@ -1576,6 +1585,9 @@ void GS::vertexKick(bool drawing)
+     if (drawing && m_backend)
+     {
+         GSPrimitiveBatch batch = buildDrawBatch(needed);
++        dbgstat::draws.fetch_add(1, std::memory_order_relaxed);
++        if (m_prim.tme) dbgstat::drawsTex.fetch_add(1, std::memory_order_relaxed);
++        dbgstat::drawsFbp[m_ctx[m_prim.ctxt].frame.fbp & 511u].fetch_add(1, std::memory_order_relaxed);
+         updatePreferredDisplaySourceForDraw(batch);
+         m_backend->Submit(batch);
+         recordDrawDebugEventUnlocked(needed);
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index d888a0a..5dc4c05 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1,3 +1,6 @@
++#include "runtime/ps2_dbgstat.h"
++#include "runtime/gs/ps2_gs_memory.h"
++#include <cstdio>
+ #include "ps2_runtime.h"
+ #include "ps2_log.h"
+ #include "ps2_stubs.h"
+@@ -2409,6 +2412,58 @@ void PS2Runtime::run()
+                 const uint32_t dbgGp = m_debugGp.load(std::memory_order_relaxed);
+                 const auto eeSnapshot = m_eeScheduler->snapshot();
+ 
++                {
++                    std::ostringstream fb;
++                    for (uint32_t i = 0; i < 512u; ++i)
++                    {
++                        const uint64_t n = dbgstat::drawsFbp[i].exchange(0, std::memory_order_relaxed);
++                        if (n) fb << ' ' << i << ':' << n;
++                    }
++                    RUNTIME_LOG("[dbgstat] vifCmds=" << dbgstat::vifCmds.exchange(0)
++                                << " direct=" << dbgstat::vifDirect.exchange(0)
++                                << " unpack=" << dbgstat::vifUnpack.exchange(0)
++                                << " mpg=" << dbgstat::vifMpg.exchange(0)
++                                << " mscal=" << dbgstat::vifMscal.exchange(0)
++                                << " mscnt=" << dbgstat::vifMscnt.exchange(0)
++                                << " xgkick=" << dbgstat::xgkick.exchange(0)
++                                << " draws=" << dbgstat::draws.exchange(0)
++                                << " tex=" << dbgstat::drawsTex.exchange(0)
++                                << " fbp{" << fb.str() << " }" << std::endl);
++                    if (tick == 1200) { dbgstat::primBudget.store(40); dbgstat::gifBudget.store(80); }
++                    if (const char *dir = std::getenv("DRA2_DUMP_FB"))
++                    {
++                        struct Fb { uint32_t fbp; bool ct16; };
++                        for (Fb f : {Fb{0, true}, Fb{70, false}, Fb{280, false}})
++                        {
++                            uint8_t *vram = m_memory.getGSVRAM();
++                            char path[512];
++                            std::snprintf(path, sizeof(path), "%s/fb%03u_t%05llu.ppm", dir, f.fbp, (unsigned long long)tick);
++                            FILE *out = std::fopen(path, "wb");
++                            if (!out) continue;
++                            std::fprintf(out, "P6 640 448 255\n");
++                            uint64_t nonBlack = 0;
++                            for (uint32_t y = 0; y < 448; ++y)
++                                for (uint32_t x = 0; x < 640; ++x)
++                                {
++                                    uint8_t rgb[3];
++                                    if (f.ct16)
++                                    {
++                                        const uint32_t c = GSMem::ReadCT16(vram, f.fbp * 32u, 10, x, y);
++                                        rgb[0] = (c & 31u) << 3; rgb[1] = ((c >> 5) & 31u) << 3; rgb[2] = ((c >> 10) & 31u) << 3;
++                                    }
++                                    else
++                                    {
++                                        const uint32_t c = GSMem::ReadCT32(vram, f.fbp * 32u, 10, x, y);
++                                        rgb[0] = c & 0xFF; rgb[1] = (c >> 8) & 0xFF; rgb[2] = (c >> 16) & 0xFF;
++                                    }
++                                    nonBlack += (rgb[0] | rgb[1] | rgb[2]) != 0;
++                                    std::fwrite(rgb, 1, 3, out);
++                                }
++                            std::fclose(out);
++                            RUNTIME_LOG("[dbgstat:fb] fbp=" << f.fbp << " nonBlack=" << nonBlack << std::endl);
++                        }
++                    }
++                }
+                 RUNTIME_LOG("[run:tick] tick=" << tick
+                                                << " pc=0x" << std::hex << dbgPc
+                                                << " ra=0x" << dbgRa
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+index f872edd..11c2587 100644
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -1,4 +1,5 @@
+ // Based on Blackline Interactive implementation
++#include "runtime/ps2_dbgstat.h"
+ #include "runtime/ps2_memory.h"
+ #include <cstring>
+ 
+@@ -336,6 +337,12 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+         pos += 4;
+ 
+         uint8_t opcode = (cmd >> 24) & 0x7F;
++        dbgstat::vifCmds.fetch_add(1, std::memory_order_relaxed);
++        if (opcode == 0x50 || opcode == 0x51) dbgstat::vifDirect.fetch_add(1, std::memory_order_relaxed);
++        else if (opcode == 0x14 || opcode == 0x15) dbgstat::vifMscal.fetch_add(1, std::memory_order_relaxed);
++        else if (opcode == 0x17) dbgstat::vifMscnt.fetch_add(1, std::memory_order_relaxed);
++        else if (opcode == 0x4A) dbgstat::vifMpg.fetch_add(1, std::memory_order_relaxed);
++        else if ((opcode & 0x60) == 0x60) dbgstat::vifUnpack.fetch_add(1, std::memory_order_relaxed);
+         uint16_t imm = cmd & 0xFFFF;
+         uint8_t num = (cmd >> 16) & 0xFF;
+         const bool irq = (cmd & 0x80000000u) != 0u;
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index fd46b07..07d4c4b 100644
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1,3 +1,4 @@
++#include "runtime/ps2_dbgstat.h"
+ #include "runtime/ps2_vu1.h"
+ #include "runtime/gs/ps2_gif_arbiter.h"
+ #include "runtime/gs/gs_frontend.h"
+@@ -932,6 +933,7 @@ void VU1Interpreter::startXgkick(uint32_t qwordAddress)
+         return;
+ 
+     const uint32_t sourceAddress = (qwordAddress * 16u) % m_activeVuDataSize;
++    dbgstat::xgkick.fetch_add(1, std::memory_order_relaxed);
+     m_xgkick = {};
+     m_xgkick.active = true;
+     m_xgkick.sourceAddress = sourceAddress;
+-- 
+2.56.0
+

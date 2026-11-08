@@ -1,0 +1,168 @@
+From 2e72d55af3c87f27e1e3e6f9b1a159493602059c Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sat, 7 Nov 2026 19:45:36 -0300
+Subject: [PATCH] ps2xRuntime: paginar a enumeracao do memory card
+
+---
+ .../src/lib/Kernel/Stubs/MemoryCard.cpp       | 53 +++++++++++++------
+ ps2xTest/src/ps2_runtime_io_tests.cpp         | 19 +++++++
+ 2 files changed, 56 insertions(+), 16 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp b/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp
+index 564d873..d513246 100644
+--- a/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp
++++ b/ps2xRuntime/src/lib/Kernel/Stubs/MemoryCard.cpp
+@@ -80,6 +80,8 @@ namespace ps2_stubs
+         {
+             std::string currentDir = "/";
+             bool formatted = true;
++            std::vector<SceMcTblGetDir> directoryEntries;
++            size_t directoryCursor = 0;
+         };
+ 
+         std::mutex g_mcStateMutex;
+@@ -641,6 +643,8 @@ namespace ps2_stubs
+             for (McPortState &state : g_mcPorts)
+             {
+                 state.currentDir = "/";
++                state.directoryEntries.clear();
++                state.directoryCursor = 0;
+             }
+         }
+ 
+@@ -684,6 +688,8 @@ namespace ps2_stubs
+                 {
+                     McPortState &state = g_mcPorts[static_cast<size_t>(port)];
+                     state.currentDir = "/";
++                    state.directoryEntries.clear();
++                    state.directoryCursor = 0;
+                     state.formatted = true;
+                     result = kMcResultSucceed;
+                 }
+@@ -699,9 +705,27 @@ namespace ps2_stubs
+         const int32_t port = static_cast<int32_t>(getRegU32(ctx, 4));
+         const int32_t slot = static_cast<int32_t>(getRegU32(ctx, 5));
+         const std::string rawPath = readPs2CStringBounded(rdram, getRegU32(ctx, 6), kMcMaxPathLen);
++        const uint32_t mode = getRegU32(ctx, 7);
+         const int32_t maxEntries = static_cast<int32_t>(getRegU32(ctx, 8));
+         const uint32_t tableAddr = getRegU32(ctx, 9);
+ 
++        auto copyPage = [&](McPortState &state) -> int32_t
++        {
++            const size_t count = std::min(state.directoryEntries.size() - state.directoryCursor,
++                                         maxEntries > 0 ? static_cast<size_t>(maxEntries) : 0u);
++            if (count != 0u && tableAddr != 0u)
++            {
++                uint8_t *dst = getMemPtr(rdram, tableAddr);
++                if (!dst)
++                {
++                    return kMcResultDeniedPermit;
++                }
++                std::memcpy(dst, state.directoryEntries.data() + state.directoryCursor,
++                            count * sizeof(SceMcTblGetDir));
++            }
++            state.directoryCursor += count;
++            return static_cast<int32_t>(count);
++        };
+         std::vector<SceMcTblGetDir> entries;
+         int32_t result = kMcResultNoEntry;
+         {
+@@ -713,8 +737,14 @@ namespace ps2_stubs
+                 {
+                     result = kMcResultNoFormat;
+                 }
++                else if (mode != 0u)
++                {
++                    result = copyPage(state);
++                }
+                 else
+                 {
++                    state.directoryEntries.clear();
++                    state.directoryCursor = 0;
+                     ensureMcRootExists(port);
+                     const std::string guestQuery =
+                         normalizeGuestMcPathLocked(port, rawPath.empty() ? "." : rawPath);
+@@ -821,21 +851,8 @@ namespace ps2_stubs
+                             entries.push_back(tableEntry);
+                         }
+ 
+-                        const size_t entryCount =
+-                            std::min(entries.size(), maxEntries > 0 ? static_cast<size_t>(maxEntries) : 0u);
+-                        if (entryCount == 0u || tableAddr == 0u)
+-                        {
+-                            result = static_cast<int32_t>(entryCount);
+-                        }
+-                        else if (uint8_t *dst = getMemPtr(rdram, tableAddr))
+-                        {
+-                            std::memcpy(dst, entries.data(), entryCount * sizeof(SceMcTblGetDir));
+-                            result = static_cast<int32_t>(entryCount);
+-                        }
+-                        else
+-                        {
+-                            result = kMcResultDeniedPermit;
+-                        }
++                        state.directoryEntries = std::move(entries);
++                        result = copyPage(state);
+                     }
+                 }
+             }
+@@ -843,7 +860,7 @@ namespace ps2_stubs
+             setMcCommandResultLocked(kMcCmdGetDir, result);
+         }
+         RUNTIME_LOG("[MC] GetDir port=" << port << " '" << rawPath
+-                                        << "' maxent=" << maxEntries << " -> result=" << result);
++                                        << "' mode=" << mode << " maxent=" << maxEntries << " -> result=" << result);
+         setReturnS32(ctx, 0);
+     }
+ 
+@@ -928,6 +945,8 @@ namespace ps2_stubs
+             for (McPortState &state : g_mcPorts)
+             {
+                 state.currentDir = "/";
++                state.directoryEntries.clear();
++                state.directoryCursor = 0;
+                 state.formatted = true;
+             }
+         }
+@@ -1254,6 +1273,8 @@ namespace ps2_stubs
+                 {
+                     McPortState &state = g_mcPorts[static_cast<size_t>(port)];
+                     state.currentDir = "/";
++                    state.directoryEntries.clear();
++                    state.directoryCursor = 0;
+                     state.formatted = false;
+                     result = kMcResultSucceed;
+                 }
+diff --git a/ps2xTest/src/ps2_runtime_io_tests.cpp b/ps2xTest/src/ps2_runtime_io_tests.cpp
+index 4f979be..c12d528 100644
+--- a/ps2xTest/src/ps2_runtime_io_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_io_tests.cpp
+@@ -581,6 +581,25 @@ void register_ps2_runtime_io_tests()
+                      "sceMcGetDir should report the host file size");
+             t.IsTrue((entries[2].attrFile & 0x0080u) != 0u,
+                      "sceMcGetDir file entries should carry the closed-file attribute");
++
++            // Starting a new search resets the enumeration; followups consume it.
++            setRegU32(test.ctx, 7, 0u);
++            setRegU32(test.ctx, 8, 2u);
++            ps2_stubs::sceMcGetDir(test.rdram.data(), &test.ctx, nullptr);
++            t.Equals(syncMc(test.rdram, &cmd), 2, "first page should contain two entries");
++            setRegU32(test.ctx, 7, 1u);
++            ps2_stubs::sceMcGetDir(test.rdram.data(), &test.ctx, nullptr);
++            t.Equals(syncMc(test.rdram, &cmd), 1, "followup should return only the remaining file");
++            t.Equals(std::string(entries[0].entryName), std::string("game.dat"),
++                     "followup must not repeat dot entries");
++            ps2_stubs::sceMcGetDir(test.rdram.data(), &test.ctx, nullptr);
++            t.Equals(syncMc(test.rdram, &cmd), 0, "exhausted search must terminate with zero");
++            ps2_stubs::sceMcGetDir(test.rdram.data(), &test.ctx, nullptr);
++            t.Equals(syncMc(test.rdram, &cmd), 0, "exhausted search stays exhausted");
++            setRegU32(test.ctx, 7, 0u);
++            ps2_stubs::sceMcGetDir(test.rdram.data(), &test.ctx, nullptr);
++            t.Equals(syncMc(test.rdram, &cmd), 2, "mode zero restarts the search");
++            t.Equals(std::string(entries[0].entryName), std::string("."), "restart returns first entry");
+         });
+ 
+         tc.Run("sceMcGetInfo reports formatted and unformatted states", [](TestCase &t)
+-- 
+2.56.0
+

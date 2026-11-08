@@ -287,6 +287,14 @@ namespace
         it->second(rdram, ctx, runtime);
     }
 
+    // O fragmento 0x3a886c termina no LD de 0x3a888c, sem registrar esse PC.
+    // 0x3a8888 contém somente NOP antes do mesmo epílogo LD/JR/ADDIU.
+    // Reutilizar a entrada gerada preserva o epílogo ao retomar pelo scheduler.
+    void resumeDmaWaitEpilogue(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
+    {
+        entry_003a8888_0x3a8888(rdram, ctx, runtime);
+    }
+
     void apply(PS2Runtime &runtime)
     {
         configureDiscImage();
@@ -309,6 +317,7 @@ namespace
         std::fprintf(stderr, "[dra2] %zu/%zu SDK bindings aplicados\n", bound, std::size(kSdkBindings));
 
         // Depois dos bindings do SDK, para sobrescrever os handlers genéricos.
+        runtime.replaceFunction(0x003A888Cu, resumeDmaWaitEpilogue);
         runtime.replaceFunction(0x00408B68u, ttyWrite);
         runtime.replaceFunction(0x0040B168u, sifBindRpcBlocking);
         runtime.replaceFunction(0x003F2CD0u, padPortOpenMultitap);
