@@ -1,0 +1,45 @@
+From 87841238d249443cd7cf68b7fa9cfd4e12a7f3e7 Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sun, 8 Nov 2026 16:20:12 -0300
+Subject: [PATCH] fix: preserve constant GS triangle color and depth attributes
+
+---
+ ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index 8d921fe..b2d2151 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -1296,6 +1296,15 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
+     const GSVertex &v2 = batch.vertices[2];
+     const auto &ctx = state.context;
+ 
++    // Barycentric weights need not sum to exactly one in host floating point,
++    // especially under the VU caller's FE_TOWARDZERO. A zero GS DDA gradient
++    // must preserve its attribute instead of losing a color/depth unit.
++    const bool constantDepth = v0.z == v1.z && v1.z == v2.z;
++    const bool constantColor = v0.r == v1.r && v1.r == v2.r &&
++                               v0.g == v1.g && v1.g == v2.g &&
++                               v0.b == v1.b && v1.b == v2.b &&
++                               v0.a == v1.a && v1.a == v2.a;
++
+     int ofx = ctx.xyoffset.ofx >> 4;
+     int ofy = ctx.xyoffset.ofy >> 4;
+ 
+@@ -1338,10 +1347,10 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
+             if (w0 < -kEdgeEpsilon || w1 < -kEdgeEpsilon || w2 < -kEdgeEpsilon)
+                 continue;
+ 
+-            double z = v0.z * w0 + v1.z * w1 + v2.z * w2;
++            double z = constantDepth ? v0.z : v0.z * w0 + v1.z * w1 + v2.z * w2;
+ 
+             uint8_t r, g, b, a;
+-            if (state.prim.iip)
++            if (state.prim.iip && !constantColor)
+             {
+                 r = clampU8(static_cast<int>(v0.r * w0 + v1.r * w1 + v2.r * w2));
+                 g = clampU8(static_cast<int>(v0.g * w0 + v1.g * w1 + v2.g * w2));
+-- 
+2.56.0
+
