@@ -1,0 +1,632 @@
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_gs_capture.h
+@@ -0,0 +1,75 @@
++#pragma once
++#include <cfenv>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <mutex>
++#include <stdexcept>
++namespace gscapture
++{
++inline bool enabled()
++{
++    static bool v = std::getenv("PS2X_GS_CAPTURE") != nullptr;
++    return v;
++}
++inline FILE *file = nullptr;
++inline std::recursive_mutex mutex;
++inline thread_local unsigned nesting = 0;
++inline uint64_t bytes = 0;
++inline void record(uint32_t kind, const void *data, uint32_t size)
++{
++    if (!file)
++        return;
++    if (kind != 11 && kind != 0 && kind != 4 && kind != 6)
++    {
++        uint32_t mode = std::fegetround();
++        record(11, &mode, sizeof(mode));
++    }
++    if (bytes + size + 8 > 512ull * 1024 * 1024)
++        throw std::runtime_error("GS capture exceeded 512 MiB");
++    uint32_t h[] = {kind, size};
++    if (std::fwrite(h, 1, 8, file) != 8 || (size && std::fwrite(data, 1, size, file) != size))
++        throw std::runtime_error("GS capture write failed");
++    bytes += size + 8;
++}
++inline void init(const void *vram, uint32_t size)
++{
++    if (!enabled())
++        return;
++    std::lock_guard<std::recursive_mutex> lock(mutex);
++    if (file)
++        throw std::runtime_error("GS capture cannot span multiple initializations");
++    file = std::fopen(std::getenv("PS2X_GS_CAPTURE"), "wx");
++    if (!file)
++        throw std::runtime_error("GS capture requires a new writable file");
++    std::fwrite("DRA2GS02", 1, 8, file);
++    record(0, vram, size);
++    std::fflush(file);
++    std::atexit(
++        []
++        {
++            if (file)
++                std::fclose(file);
++        });
++}
++struct Event
++{
++    std::unique_lock<std::recursive_mutex> lock;
++    bool active = false;
++    Event(uint32_t kind, const void *data, uint32_t size) : lock(mutex, std::defer_lock)
++    {
++        if (enabled())
++        {
++            lock.lock();
++            active = true;
++            if (nesting++ == 0)
++                record(kind, data, size);
++        }
++    }
++    ~Event()
++    {
++        if (active)
++            --nesting;
++    }
++};
++} // namespace gscapture
+--- /dev/null
++++ b/ps2xRuntime/include/runtime/ps2_perf.h
+@@ -0,0 +1,146 @@
++#pragma once
++#include <array>
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <ctime>
++namespace ps2perf
++{
++inline bool enabled()
++{
++    static bool v = std::getenv("PS2X_PERF") != nullptr;
++    return v;
++}
++inline bool noRaster()
++{
++    static bool v = []
++    {
++        auto p = std::getenv("PS2X_NO_RASTER");
++        return p && p[0] == '1';
++    }();
++    return v;
++}
++inline uint64_t wall()
++{
++    return std::chrono::duration_cast<std::chrono::nanoseconds>(
++               std::chrono::steady_clock::now().time_since_epoch())
++        .count();
++}
++inline uint64_t cpu()
++{
++    timespec t{};
++    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++    return uint64_t(t.tv_sec) * 1000000000 + t.tv_nsec;
++}
++enum Kind
++{
++    EE,
++    VU,
++    GS,
++    IOP,
++    Present,
++    Count
++};
++struct Counter
++{
++    std::atomic<uint64_t> cpu{0}, wall{0}, calls{0};
++};
++inline std::array<Counter, Count> counters;
++struct Scope;
++inline thread_local Scope *current = nullptr;
++struct Scope
++{
++    Kind kind;
++    Scope *parent = nullptr;
++    uint64_t c = 0, w = 0, childCpu = 0, childWall = 0;
++    bool active;
++    explicit Scope(Kind k) : kind(k), active(enabled())
++    {
++        if (active)
++        {
++            parent = current;
++            current = this;
++            c = cpu();
++            w = wall();
++        }
++    }
++    ~Scope()
++    {
++        if (active)
++        {
++            auto dc = cpu() - c, dw = wall() - w;
++            counters[kind].cpu.fetch_add(dc - childCpu, std::memory_order_relaxed);
++            counters[kind].wall.fetch_add(dw - childWall, std::memory_order_relaxed);
++            counters[kind].calls.fetch_add(1, std::memory_order_relaxed);
++            if (parent)
++            {
++                parent->childCpu += dc;
++                parent->childWall += dw;
++            }
++            current = parent;
++        }
++    }
++};
++inline uint32_t guestCounter(const uint8_t *ram);
++inline void frame(uint32_t target, uint64_t cycle, const uint8_t *ram)
++{
++    static uint32_t pc = []
++    {
++        auto p = std::getenv("PS2X_PERF_FRAME_PC");
++        return p ? uint32_t(std::strtoul(p, nullptr, 0)) : 0u;
++    }();
++    if (!pc || target != pc)
++        return;
++    static FILE *out = []
++    {
++        auto p = std::getenv("PS2X_PERF_FRAMES");
++        return p ? std::fopen(p, "wx") : nullptr;
++    }();
++    if (out)
++    {
++        std::fprintf(out, "{\"wall_ns\":%llu,\"ee_cycle\":%llu,\"guest_counter\":%u}\n",
++                     (unsigned long long)wall(), (unsigned long long)cycle, guestCounter(ram));
++        std::fflush(out);
++    }
++}
++inline uint32_t guestCounter(const uint8_t *ram)
++{
++    static uint32_t addr = []
++    {
++        auto p = std::getenv("PS2X_PERF_COUNTER");
++        return p ? uint32_t(std::strtoul(p, nullptr, 0)) : 0u;
++    }();
++    uint32_t value = 0;
++    if (addr && addr <= 32u * 1024 * 1024 - 4)
++        std::memcpy(&value, ram + addr, 4);
++    return value;
++}
++inline void report(uint32_t frames, uint64_t vsync)
++{
++    if (!enabled())
++        return;
++    static auto start = wall();
++    static uint64_t last = 0;
++    auto now = wall();
++    if (now - last < 1000000000)
++        return;
++    last = now;
++    static FILE *out = std::fopen(std::getenv("PS2X_PERF"), "wx");
++    if (!out)
++        return;
++    std::fprintf(
++        out, "{\"seconds\":%.9f,\"wall_ns\":%llu,\"guest_frames\":%u,\"vsync_ticks\":%llu,\"no_raster\":%s,\"exclusive\":{",
++        (now - start) / 1e9, (unsigned long long)now, frames, (unsigned long long)vsync, noRaster() ? "true" : "false");
++    const char *names[] = {"ee", "vu", "gs", "iop", "present"};
++    for (int i = 0; i < Count; i++)
++        std::fprintf(out, "%s\"%s\":{\"cpu_ns\":%llu,\"wall_ns\":%llu,\"calls\":%llu}", i ? "," : "",
++                     names[i], (unsigned long long)counters[i].cpu.load(),
++                     (unsigned long long)counters[i].wall.load(),
++                     (unsigned long long)counters[i].calls.load());
++    std::fputs("}}\n", out);
++    std::fflush(out);
++}
++} // namespace ps2perf
+--- a/ps2xRuntime/include/runtime/ps2_vu1.h
++++ b/ps2xRuntime/include/runtime/ps2_vu1.h
+@@ -59,6 +59,8 @@
+                 GS &gs, PS2Memory *memory = nullptr,
+                 uint32_t top = 0, uint32_t itop = 0, uint32_t maxCycles = 65536);
+ 
++    static int replayCapture(const char *path);
++
+     VU1State &state() { return m_state; }
+     const VU1State &state() const { return m_state; }
+ 
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -1,3 +1,4 @@
++#include "runtime/ps2_perf.h"
+ #include "runtime/ee_scheduler.h"
+ 
+ #include "ps2_log.h"
+@@ -159,6 +160,7 @@
+ 
+     while (!m_stopRequested.load(std::memory_order_acquire))
+     {
++        ps2perf::Scope perfScope(ps2perf::EE);
+         processPendingEvents();
+         if (m_stopRequested.load(std::memory_order_acquire))
+         {
+@@ -296,6 +298,7 @@
+         {
+             m_insideInterrupt = !running->invocations.empty() && running->invocations.back().kind == GuestInvocationKind::Interrupt;
+             m_guestExecuting.store(true, std::memory_order_release);
++            ps2perf::frame(context.pc, m_eeCycle, m_rdram);
+             function(m_rdram, &context, &m_runtime);
+             m_guestExecuting.store(false, std::memory_order_release);
+             m_insideInterrupt = false;
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -1,3 +1,4 @@
++#include "runtime/ps2_perf.h"
+ #include "runtime/ps2_dbgstat.h"
+ #include "runtime/gs/gs_cpu_backend.h"
+ #include "runtime/gs/ps2_gs_common.h"
+@@ -554,7 +555,7 @@
+     std::lock_guard<std::mutex> lock(m_mutex);
+     if (!m_vram || batch.vertexCount == 0u)
+         return;
+-    DrawPrimitive(batch);
++    if (!ps2perf::noRaster()) DrawPrimitive(batch);
+ }
+ 
+ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
+@@ -1720,6 +1721,7 @@
+ 
+ bool GSCpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
+ {
++    if(ps2perf::noRaster()) return true;
+     std::lock_guard<std::mutex> lock(m_mutex);
+     if (!m_vram || context.frame.fbw == 0u)
+         return false;
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1,3 +1,5 @@
++#include "runtime/ps2_perf.h"
++#include "runtime/ps2_gs_capture.h"
+ #include "runtime/ps2_dbgstat.h"
+ #include "runtime/gs/gs_frontend.h"
+ #include "runtime/gs/gs_cpu_backend.h"
+@@ -114,6 +116,7 @@
+ 
+ void GS::init(uint8_t *vram, uint32_t vramSize, GSRegisters *privRegs)
+ {
++    gscapture::init(vram, vramSize);
+     m_localMemoryStorage = vram;
+     m_localMemorySize = vramSize;
+     m_privRegs = privRegs;
+@@ -126,6 +129,7 @@
+ void GS::reset()
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    gscapture::Event capture(10,nullptr,0);
+     std::memset(m_ctx, 0, sizeof(m_ctx));
+     m_prim = {};
+     m_primRegister = {};
+@@ -527,6 +531,15 @@
+ 
+ void GS::latchHostPresentationFrame()
+ {
++    std::unique_lock<std::recursive_mutex> captureState(m_stateMutex,std::defer_lock);
++    std::unique_lock<std::recursive_mutex> captureLock(gscapture::mutex,std::defer_lock);
++    if(gscapture::enabled()) { captureState.lock(); captureLock.lock(); }
++    if(gscapture::file && m_privRegs) {
++        uint64_t regs[]={m_privRegs->pmode,m_privRegs->smode2,m_privRegs->dispfb1,m_privRegs->display1,m_privRegs->dispfb2,m_privRegs->display2,m_privRegs->bgcolor};
++        gscapture::record(5,regs,sizeof(regs));
++    }
++
++    ps2perf::Scope perfScope(ps2perf::GS);
+     GSPresentationRequest request{};
+     {
+         std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+@@ -549,6 +562,13 @@
+             m_backend->Flush();
+             m_backend->Sync(GSSyncReason::Presentation);
+             frame = m_backend->Present(request);
++            if(gscapture::file) {
++                std::vector<uint8_t> reference;
++                m_backend->SnapshotVram(reference);
++                static uint32_t captureFrame=0;
++                if(++captureFrame % 30u == 0u) gscapture::record(6,reference.data(),reference.size());
++                std::fflush(gscapture::file);
++            }
+         }
+     }
+ 
+@@ -641,10 +661,12 @@
+ 
+ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ {
++    ps2perf::Scope perfScope(ps2perf::GS);
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     if (!data || sizeBytes < 16 || !m_backend)
+         return;
+ 
++    gscapture::Event capture(1, data, sizeBytes);
+     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
+         return;
+ 
+@@ -744,6 +766,7 @@
+ 
+ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ {
++    ps2perf::Scope perfScope(ps2perf::GS);
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     if (!data || sizeBytes < 16u || !m_backend)
+         return false;
+@@ -751,6 +774,7 @@
+     if (!validatePackedGifPacket(data, sizeBytes))
+         return false;
+ 
++    gscapture::Event capture(1, data, sizeBytes);
+     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
+                                                 {
+         m_curQ = 1.0f;
+@@ -793,7 +817,11 @@
+                            const uint8_t *data,
+                            uint32_t sizeBytes)
+ {
++    ps2perf::Scope perfScope(ps2perf::GS);
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    uint64_t regs[]={bitbltbuf,trxpos,trxreg,trxdir};
++    gscapture::Event capture(3, regs, sizeof(regs));
++    if(gscapture::file) gscapture::record(4, data, sizeBytes);
+     uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
+ }
+ 
+@@ -1071,7 +1099,10 @@
+ 
+ void GS::writeRegister(uint8_t regAddr, uint64_t value)
+ {
++    ps2perf::Scope perfScope(ps2perf::GS);
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    uint64_t reg[]={regAddr,value};
++    gscapture::Event capture(2, reg, sizeof(reg));
+     writeRegisterUnlocked(regAddr, value);
+ }
+ 
+@@ -1630,18 +1661,24 @@
+ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    uint32_t clear[]={contextIndex,rgba};
++    gscapture::Event capture(7,clear,sizeof(clear));
+     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
+ }
+ 
+ bool GS::clearActiveFramebuffer(uint32_t rgba)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    uint32_t clear[]={m_prim.ctxt ? 1u : 0u,rgba};
++    gscapture::Event capture(7,clear,sizeof(clear));
+     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
+ }
+ 
+ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+ {
++    ps2perf::Scope perfScope(ps2perf::GS);
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    gscapture::Event capture(8,&maxBytes,sizeof(maxBytes));
+     return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
+ }
+ 
+@@ -1683,6 +1720,8 @@
+ void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y, uint32_t value)
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
++    uint32_t values[]={psm,base,bw,x,y,value};
++    gscapture::Event capture(9,values,sizeof(values));
+     if (m_backend)
+         m_backend->WriteVram(psm, base, bw, x, y, value);
+ }
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1,3 +1,4 @@
++#include "runtime/ps2_perf.h"
+ #include "runtime/ps2_dbgstat.h"
+ #include "runtime/gs/ps2_gs_memory.h"
+ #include <cstdio>
+@@ -597,6 +598,7 @@
+ 
+ ps2x::iop::RpcResult PS2Runtime::handleIopRpc(uint8_t *rdram, R5900Context *ctx, ps2x::iop::RpcRequest request)
+ {
++    ps2perf::Scope perfScope(ps2perf::IOP);
+     auto scope = m_iopHost->enterCall(ctx, rdram);
+     request.callToken = scope.token();
+     return m_iopSubsystem->handleRpc(request);
+@@ -604,12 +606,14 @@
+ 
+ void PS2Runtime::notifyIopSifTransfer(uint8_t *rdram, const ps2x::iop::SifTransfer &transfer)
+ {
++    ps2perf::Scope perfScope(ps2perf::IOP);
+     auto scope = m_iopHost->enterCall(nullptr, rdram);
+     m_iopSubsystem->onSifTransfer(transfer);
+ }
+ 
+ void PS2Runtime::advanceIopEeCycles(uint64_t eeCycles) noexcept
+ {
++    ps2perf::Scope perfScope(ps2perf::IOP);
+     m_iopSubsystem->runEeCycles(eeCycles);
+ }
+ 
+@@ -1403,6 +1407,7 @@
+         return false;
+     }
+ 
++    ps2perf::frame(targetPc, m_eeScheduler ? m_eeScheduler->eeCycle() : 0, rdram);
+     RecompiledFunction targetFn = lookupFunction(targetPc);
+     const uint32_t entryPc = ctx->pc;
+     const uint64_t checkpointGeneration = m_eeScheduler ? m_eeScheduler->checkpointGeneration() : 0u;
+@@ -2489,6 +2494,8 @@
+ 
+             }
+         });
++        ps2perf::report(ps2perf::guestCounter(m_memory.getRDRAM()), m_memory.gs().vsyncTick.load());
++        ps2perf::Scope presentScope(ps2perf::Present);
+         uint32_t presentWidth = FB_WIDTH;
+         uint32_t presentHeight = DEFAULT_DISPLAY_HEIGHT;
+         UploadFrame(frameTex, this, presentWidth, presentHeight);
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1,3 +1,9 @@
++#include <memory>
++#include <fstream>
++#include <vector>
++#include <type_traits>
++#include <stdexcept>
++#include "runtime/ps2_perf.h"
+ #include "runtime/ps2_dbgstat.h"
+ #include "runtime/ps2_vu1.h"
+ #include "runtime/gs/ps2_gif_arbiter.h"
+@@ -915,11 +921,33 @@
+     }
+ }
+ 
++namespace
++{
++thread_local bool vuReplaySink = false;
++thread_local uint64_t vuGifHash = 14695981039346656037ull, vuGifBytes = 0;
++bool vuObserve()
++{
++    static bool enabled =
++        std::getenv("PS2X_VU_CAPTURE") != nullptr || std::getenv("PS2X_VU_REPLAY") != nullptr;
++    return enabled || vuReplaySink;
++}
++} // namespace
+ void VU1Interpreter::finishXgkick()
+ {
+     if (!m_xgkick.active)
+         return;
+ 
++    if (vuObserve())
++    {
++        for (uint32_t i = 0; i < m_xgkick.totalBytes; i++)
++            vuGifHash = (vuGifHash ^ m_xgkick.packet[i]) * 1099511628211ull;
++        vuGifBytes += m_xgkick.totalBytes;
++    }
++    if (vuReplaySink)
++    {
++        m_xgkick.active = false;
++        return;
++    }
+     if (m_activeMemory)
+         m_activeMemory->submitGifPacket(GifPathId::Path1, m_xgkick.packet.data(), m_xgkick.totalBytes);
+     else if (m_activeGs)
+@@ -1557,7 +1585,12 @@
+                                 ((m_unit == Unit::VU1 && vuCode == memory->getVU1Code()) ||
+                                  (m_unit == Unit::VU0 && vuCode == memory->getVU0Code()));
+     if (!trackedVu1Code)
++    {
++        if (vuReplaySink && m_decodedCodeCacheValid && m_cachedVuCode == vuCode &&
++            m_cachedCodeSize == codeSize && pc / 8u < kMaxDecodedPairs)
++            return m_decodedCodeCache[pc / 8u];
+         return decodeInstructionPair(vuCode, pc);
++    }
+ 
+     const uint64_t generation = m_unit == Unit::VU1 ? memory->getVU1CodeGeneration() : memory->getVU0CodeGeneration();
+     if (!m_decodedCodeCacheValid ||
+@@ -1626,6 +1659,25 @@
+                          uint8_t *vuData, uint32_t dataSize,
+                          GS &gs, PS2Memory *memory, uint32_t maxCycles)
+ {
++    ps2perf::Scope perfScope(ps2perf::VU);
++    static unsigned captures = 0;
++    const char *capturePrefix = std::getenv("PS2X_VU_CAPTURE");
++    std::unique_ptr<VU1Interpreter> captured;
++    std::vector<uint8_t> inputCode, inputData;
++    if (capturePrefix && !vuReplaySink && m_unit == Unit::VU1 && captures < 16)
++    {
++        captured = std::make_unique<VU1Interpreter>(*this);
++        captured->m_cachedVuCode = nullptr;
++        captured->m_cachedMemory = nullptr;
++        captured->m_activeVuData = nullptr;
++        captured->m_activeGs = nullptr;
++        captured->m_activeMemory = nullptr;
++        captured->m_decodedCodeCacheValid = false;
++        inputCode.assign(vuCode, vuCode + codeSize);
++        inputData.assign(vuData, vuData + dataSize);
++    }
++    vuGifHash = 14695981039346656037ull;
++    vuGifBytes = 0;
+     m_activeVuData = vuData;
+     m_activeVuDataSize = dataSize;
+     m_activeGs = &gs;
+@@ -1835,6 +1887,74 @@
+         m_pendingHaltT = false;
+     }
+     m_state.cycles = m_cycle;
++    if (captured && vuGifBytes)
++    {
++        static_assert(std::is_trivially_copyable_v<VU1Interpreter>);
++        std::string path = std::string(capturePrefix) + "-" + std::to_string(captures++) + ".vu";
++        std::ofstream out(path, std::ios::binary | std::ios::trunc);
++        const uint32_t header[] = {uint32_t(sizeof(VU1Interpreter)), codeSize, dataSize, maxCycles};
++        out.write("DRA2VU01", 8);
++        out.write(reinterpret_cast<const char *>(header), sizeof(header));
++        out.write(reinterpret_cast<const char *>(captured.get()), sizeof(VU1Interpreter));
++        out.write(reinterpret_cast<const char *>(inputCode.data()), codeSize);
++        out.write(reinterpret_cast<const char *>(inputData.data()), dataSize);
++        out.write(reinterpret_cast<const char *>(&m_state), sizeof(m_state));
++        out.write(reinterpret_cast<const char *>(vuData), dataSize);
++        out.write(reinterpret_cast<const char *>(&vuGifHash), sizeof(vuGifHash));
++        out.write(reinterpret_cast<const char *>(&vuGifBytes), sizeof(vuGifBytes));
++        if (!out)
++            throw std::runtime_error("VU capture write failed");
++    }
+     if (useVuRounding && previousRoundingMode != -1)
+         std::fesetround(previousRoundingMode);
+ }
++
++int VU1Interpreter::replayCapture(const char *path)
++{
++    std::ifstream in(path, std::ios::binary);
++    char magic[8];
++    uint32_t header[4];
++    if (!in.read(magic, 8) || std::memcmp(magic, "DRA2VU01", 8) ||
++        !in.read(reinterpret_cast<char *>(header), sizeof(header)) || header[0] != sizeof(VU1Interpreter) ||
++        header[1] > 16384 || header[2] > 16384 || !header[1] || !header[2] || header[3] > 1000000)
++        throw std::runtime_error("invalid VU capture or incompatible build");
++    auto original = std::make_unique<VU1Interpreter>();
++    in.read(reinterpret_cast<char *>(original.get()), sizeof(VU1Interpreter));
++    std::vector<uint8_t> code(header[1]), data(header[2]), expectedData(header[2]);
++    VU1State expectedState{};
++    uint64_t hash, bytes;
++    in.read(reinterpret_cast<char *>(code.data()), code.size());
++    in.read(reinterpret_cast<char *>(data.data()), data.size());
++    in.read(reinterpret_cast<char *>(&expectedState), sizeof(expectedState));
++    in.read(reinterpret_cast<char *>(expectedData.data()), expectedData.size());
++    in.read(reinterpret_cast<char *>(&hash), sizeof(hash));
++    in.read(reinterpret_cast<char *>(&bytes), sizeof(bytes));
++    if (!in || in.peek() != std::char_traits<char>::eof())
++        throw std::runtime_error("truncated VU capture");
++    if (original->m_cachedVuCode || original->m_cachedMemory || original->m_activeVuData ||
++        original->m_activeGs || original->m_activeMemory)
++        throw std::runtime_error("VU capture contains host pointers");
++    GS sink;
++    std::vector<uint8_t> scratchVram(4 * 1024 * 1024);
++    sink.init(scratchVram.data(), scratchVram.size());
++    original->rebuildDecodedCodeCache(code.data(), code.size(), nullptr, 0);
++    double total = 0;
++    vuReplaySink = true;
++    for (unsigned iteration = 0; iteration < 6; iteration++)
++    {
++        auto replay = std::make_unique<VU1Interpreter>(*original);
++        auto input = data;
++        const auto started = ps2perf::wall();
++        replay->run(code.data(), code.size(), input.data(), input.size(), sink, nullptr, header[3]);
++        const auto elapsed = ps2perf::wall() - started;
++        if (std::memcmp(&replay->m_state, &expectedState, sizeof(expectedState)) || input != expectedData ||
++            vuGifHash != hash || vuGifBytes != bytes)
++            throw std::runtime_error("VU replay diverged: registers, data or emitted GIF");
++        if (iteration)
++            total += elapsed / 1e9;
++    }
++    vuReplaySink = false;
++    std::printf("{\"iterations\":5,\"mean_seconds\":%.9f,\"gif_bytes\":%llu,\"verified\":true}\n", total / 5,
++                (unsigned long long)bytes);
++    return 0;
++}

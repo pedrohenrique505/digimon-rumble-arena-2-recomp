@@ -87,3 +87,7 @@ if(PS2X_ENABLE_DEBUG_UI)
     target_link_libraries(dra2 PRIVATE rlImGui imgui)
     target_compile_definitions(dra2 PRIVATE PS2X_ENABLE_DEBUG_UI=1)
 endif()
+
+# Offline diagnostic tool; never part of the normal game target.
+add_executable(dra2-vu-replay EXCLUDE_FROM_ALL tools/vu_replay.cpp)
+target_link_libraries(dra2-vu-replay PRIVATE ps2_runtime)
