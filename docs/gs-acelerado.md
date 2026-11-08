@@ -202,3 +202,32 @@ o stderr recebe `[dra2-gs] shadow latches=... gif=... nativeFallbacks=...
 fifoReq=... fifoBytes=...`. Sem Vulkan, o sink se desliga com aviso e o
 jogo segue no CPU. Apresentação GPU na janela e promoção a backend
 autoritativo não fazem parte deste modo.
+
+## Scanout diagnóstico NTSC (continuação)
+
+```bash
+.cache/gs-replay-build/dra2-gs-replay-vulkan captura.gs .cache/scanout-novo --scanout-ntsc
+python3 tools/test_gs_scanout.py .cache/gs-replay-build/dra2-gs-replay-vulkan --gpu
+python3 tools/test_gs_scanout.py .cache/gs-replay-build/dra2-gs-replay
+```
+
+A opção exporta a imagem retornada pelo **último** `vsync` em
+`<prefixo>.scanout.ppm`, com dimensões reais e metadados em `.scanout.json`.
+Pode ser combinada com `--checkpoints`. Sem imagem no último latch, retorna
+erro; não reutiliza silenciosamente uma imagem anterior. O readback final
+síncrono fica em `scanout_export_seconds`, fora de trabalho/sincronização do
+replay. É uma ferramenta offline; não serve de caminho de apresentação ao vivo.
+
+**Limite descoberto:** `DRA2GS02` omite SMODE1 e o HLE `GsSetCrt` atual não
+preenche esse registrador. O paraLLEl-GS recebe LC=0, avisa `Unknown video
+format` e pode retornar scanout vazio. As medições históricas de 37,25× não
+comprovam custo de scanout com imagem válida, nem apresentação. A opção acima
+assume explicitamente LC analógico e CMOD NTSC; o JSON registra
+`video_mode_source=explicit-ntsc-assumption`. Essa hipótese não é um registrador
+observado e não concede aprovação visual. Próximo passo: implementar o estado
+de vídeo do HLE e capturá-lo antes de integrar a imagem à janela.
+
+A captura longa produziu scanout 640×448 no latch 660 com essa opção.
+A regressão sintética verifica todos os pixels de uma imagem uniforme 640×224,
+metadados, ausência de imagem e proteção de arquivos existentes. Os 15 casos
+anteriores continuam passando em CPU e Vulkan.

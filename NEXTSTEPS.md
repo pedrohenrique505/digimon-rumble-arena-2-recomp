@@ -37,7 +37,7 @@ A rodada histórica de diagnóstico e otimização bilinear (patch 0014) está
 | --- | --- | --- |
 | Replay GS, cinco pares do mesmo fluxo | CPU 49,3682 s → Vulkan 1,3253 s; **37,25×** | Só GS offline; não é ganho de FPS do jogo |
 | Referência CPU da captura maior | 22 checkpoints de VRAM iguais byte a byte em cada um dos cinco replays | Valida captura/reprodução CPU, não equivalência GPU |
-| Replay Vulkan | Fluxo de 660 latches reproduzido com scanout | Há diferenças nos 22 checkpoints; imagem ainda não aprovada; sem swap de janela |
+| Replay Vulkan | Fluxo de 660 latches reproduzido; scanout válido não comprovado na medição histórica | Há diferenças nos 22 checkpoints; imagem ainda não aprovada; sem swap de janela |
 | Jogo, quadros 200–260, cinco execuções por variante | 10,03 submissões/s com contadores; 23,26/s sem rasterização | Imagem inválida sem desenho; dispersão relevante; não é FPS único apresentado |
 | Replay VU | 16 amostras verificadas em registradores, memória e GIF; cinco repetições medidas por amostra | Mesmo hash de código nas 16; não cobre VUs caros da partida |
 | Testes de captura/replay | 11 casos passaram em cada backend CPU/Vulkan | Uploads parciais, escrita direta, preservação de alfa, divergência e framing |
@@ -263,3 +263,13 @@ completo das cerca de duas mil ações antigas pendentes do código gerado.
 A infraestrutura de captura/diagnóstico e a prova paraLLEl-GS são versionadas
 em commits separados. Capturas, imagens, VRAM, snapshots VU e evidências REA
 continuam em `.cache/`, fora do git.
+
+## Scanout: descoberta posterior de 08/11
+
+A exportação `--scanout-ntsc` revelou que SMODE1 está ausente da captura e do
+estado preenchido pelo HLE. O replay histórico podia retornar imagem vazia
+com `Unknown video format`: os 37,25× não comprovam custo de scanout válido.
+A exportação diagnóstica agora produz imagem e metadados sob hipótese NTSC
+explícita, com teste integral de pixels. Próximo passo da integração: preencher
+o modo de vídeo no HLE e preservá-lo no shadow/captura antes de conectar a janela.
+[Análise e validação](progression/2026-11-08-parallelgs-scanout-diagnostico.md).

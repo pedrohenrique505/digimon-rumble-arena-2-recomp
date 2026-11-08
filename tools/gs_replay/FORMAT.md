@@ -56,3 +56,16 @@ registradores. Uma execução aquece; cinco são medidas. As primeiras 16 fatias
 VU1 que emitem GIF são amostradas, sem promessa de representar as mais caras.
 EOF, tamanho incompatível e divergências são erros. A integração GPU ao jogo
 continua fora do escopo desta prova.
+
+### Exportação de scanout e estado ausente
+
+`DRA2GS02` não contém SMODE1. A chamada a `vsync` sem esse estado não prova
+scanout válido; na revisão pinada, LC=0 produz `Unknown video format` e imagem
+vazia. `--scanout-ntsc` é uma hipótese diagnóstica explícita (LC=32, CMOD=2),
+não uma extensão do formato nem recuperação do registrador original.
+Exporta somente o último latch para `.scanout.ppm` e `.scanout.json`, sem
+alterar a exportação DISPFB existente. Dimensões dependem de DISPLAY/SMODE2;
+o JSON inclui dimensões internas/do modo, latch, interlace e a origem da
+hipótese. Ausência de imagem é erro. O readback síncrono final fica em
+`scanout_export_seconds`; a execução de scanout continua em `work_seconds`.
+Essa rodada não deve substituir a matriz histórica de benchmark.
