@@ -102,15 +102,82 @@ static void saveDisplay(const std::string &path, std::vector<uint8_t> &vram,
     if (!ppm)
         throw std::runtime_error("image write failed");
 }
+#ifdef DRA2_PARALLEL_GS
+// Diagnostic readback only. Never use this synchronous path for live presentation.
+static void saveScanout(Vulkan::Device &device, const ParallelGS::ScanoutResult &scanout,
+                        const std::string &prefix, uint64_t latch)
+{
+    if (!scanout.image)
+        throw std::runtime_error("last latch has no scanout image");
+    const auto &image = *scanout.image;
+    if (image.get_format() != VK_FORMAT_R8G8B8A8_UNORM)
+        throw std::runtime_error("unsupported scanout format");
+    const uint32_t w = image.get_width(), h = image.get_height();
+    Vulkan::BufferCreateInfo bufferInfo{};
+    bufferInfo.size = size_t(w) * h * 4;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufferInfo.domain = Vulkan::BufferDomain::CachedHost;
+    auto buffer = device.create_buffer(bufferInfo);
+    if (!buffer)
+        throw std::runtime_error("scanout readback allocation failed");
+    auto cmd = device.request_command_buffer();
+    cmd->image_barrier(image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                       VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+    cmd->copy_image_to_buffer(*buffer, image, 0, {}, {w, h, 1}, 0, 0,
+                              {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
+    cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+    device.submit(cmd);
+    device.wait_idle();
+    const auto *rgba = static_cast<const uint8_t *>(
+        device.map_host_buffer(*buffer, Vulkan::MEMORY_ACCESS_READ_BIT));
+    if (!rgba)
+        throw std::runtime_error("scanout readback mapping failed");
+    std::vector<uint8_t> rgb(size_t(w) * h * 3);
+    for (size_t i = 0; i < size_t(w) * h; i++)
+        std::memcpy(rgb.data() + i * 3, rgba + i * 4, 3);
+    device.unmap_host_buffer(*buffer, Vulkan::MEMORY_ACCESS_READ_BIT);
+    std::ofstream ppm(prefix + ".scanout.ppm", std::ios::binary);
+    ppm << "P6\n" << w << ' ' << h << "\n255\n";
+    ppm.write(reinterpret_cast<const char *>(rgb.data()), rgb.size());
+    if (!ppm)
+        throw std::runtime_error("scanout image write failed");
+    std::ofstream meta(prefix + ".scanout.json");
+    meta << "{\"latch\":" << latch << ",\"width\":" << w << ",\"height\":" << h
+         << ",\"internal_width\":" << scanout.internal_width
+         << ",\"internal_height\":" << scanout.internal_height
+         << ",\"mode_width\":" << scanout.mode_width << ",\"mode_height\":" << scanout.mode_height
+         << ",\"interlaced\":" << (scanout.interlaced ? "true" : "false")
+         << ",\"video_mode_source\":\"explicit-ntsc-assumption\",\"force_progressive\":true,\"anti_blur\":true,\"visual_equivalence_approved\":false}\n";
+    if (!meta)
+        throw std::runtime_error("scanout metadata write failed");
+}
+#endif
 int main(int argc, char **argv)
 try
 {
-    if (argc != 3 && (argc != 4 || std::string(argv[3]) != "--checkpoints"))
-        throw std::runtime_error("usage: dra2-gs-replay capture output-prefix [--checkpoints] (new files)");
-    if (std::filesystem::exists(std::string(argv[2]) + ".vram") ||
-        std::filesystem::exists(std::string(argv[2]) + ".ppm"))
-        throw std::runtime_error("output prefix already exists");
-    const bool checkpoints = argc == 4;
+    if (argc < 3)
+        throw std::runtime_error("usage: dra2-gs-replay capture output-prefix [--checkpoints] [--scanout-ntsc] (new files)");
+    bool checkpoints = false, exportScanout = false;
+    for (int i = 3; i < argc; i++)
+    {
+        const std::string option = argv[i];
+        if (option == "--checkpoints" && !checkpoints)
+            checkpoints = true;
+        else if (option == "--scanout-ntsc" && !exportScanout)
+            exportScanout = true;
+        else
+            throw std::runtime_error("unknown or repeated option: " + option);
+    }
+#ifndef DRA2_PARALLEL_GS
+    if (exportScanout)
+        throw std::runtime_error("--scanout-ntsc requires the Vulkan replay");
+#endif
+    for (const char *suffix : {".vram", ".ppm", ".scanout.ppm", ".scanout.json"})
+        if (std::filesystem::exists(std::string(argv[2]) + suffix))
+            throw std::runtime_error("output prefix already exists");
     const std::string checkpointDir = std::string(argv[2]) + ".checkpoints";
     if (checkpoints && !std::filesystem::create_directory(checkpointDir))
         throw std::runtime_error("checkpoint directory already exists");
@@ -134,6 +201,7 @@ try
     Vulkan::Device device;
     device.set_context(context);
     device.init_frame_contexts(4);
+    ParallelGS::ScanoutResult lastScanout{};
     ParallelGS::GSInterface gpu;
     ParallelGS::GSOptions opts{};
     if (!gpu.init(&device, opts))
@@ -355,6 +423,13 @@ try
             frames++;
 #ifdef DRA2_PARALLEL_GS
             auto &p = gpu.get_priv_register_state();
+            if (exportScanout)
+            {
+                // Legacy captures omit SMODE1. Explicit diagnostic assumption,
+                // never silently infer a video mode from the ELF region.
+                p.smode1.LC = ParallelGS::SMODE1Bits::LC_ANALOG;
+                p.smode1.CMOD = ParallelGS::SMODE1Bits::CMOD_NTSC;
+            }
             std::memcpy(&p.pmode, &display[0], 8);
             std::memcpy(&p.smode2, &display[1], 8);
             std::memcpy(&p.dispfb1, &display[2], 8);
@@ -371,6 +446,8 @@ try
             info.anti_blur = true;
             info.adapt_to_internal_horizontal_resolution = true;
             auto scanout = gpu.vsync(info);
+            if (exportScanout)
+                lastScanout = std::move(scanout);
             gpu.flush();
             device.next_frame_context();
 #else
@@ -593,6 +670,15 @@ try
     const char *backend = "cpu";
 #endif
     sync += seconds(finish);
+    double scanoutExport = 0;
+#ifdef DRA2_PARALLEL_GS
+    if (exportScanout)
+    {
+        auto start = Clock::now();
+        saveScanout(device, lastScanout, argv[2], frames);
+        scanoutExport = seconds(start);
+    }
+#endif
     save(std::string(argv[2]) + ".vram", result.data(), result.size());
     saveDisplay(std::string(argv[2]) + ".ppm", result, display);
     std::cout << "{\"backend\":\"" << backend << "\",\"records\":" << records.size()
@@ -602,6 +688,7 @@ try
               << ",\"readbacks\":" << readbacks
               << ",\"direct_writes\":" << directWrites
               << ",\"native_upload_fallbacks\":" << nativeUploadFallbacks
+              << ",\"scanout_export_seconds\":" << scanoutExport
               << ",\"work_seconds\":" << work
               << ",\"sync_seconds\":" << sync << ",\"validation_seconds\":" << validation << "}\n";
     #ifdef DRA2_PARALLEL_GS
