@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix='dra2-capture-test-') as directory:
     image[:4] = b'\x11\x22\x33\x44'
     upload = record(3, struct.pack('<QQQQ', 1 << 48, 0, 1 | (1 << 32), 0)) + record(4, bytes(image[:4]) + bytes(12))
     valid = b'DRA2GS02' + record(0, initial) + record(10) + record(11, struct.pack('<I', 0)) + upload + record(6, image)
-    tests = [('native-upload', valid, 0), ('reference-mismatch', valid[:-1] + b'\x01', 0 if gpu else 1),
+    tests = [('v3-native-upload', valid.replace(b'DRA2GS02', b'DRA2GS03', 1), 0), ('native-upload', valid, 0), ('reference-mismatch', valid[:-1] + b'\x01', 0 if gpu else 1),
              ('truncated-payload', valid[:-3], 1), ('bad-header', b'BADMAGIC', 1),
              ('missing-vram', b'DRA2GS02', 1),
              ('oversized-record', b'DRA2GS02' + struct.pack('<II', 0, 0xffffffff), 1),
@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='dra2-capture-test-') as directory:
               ('gpu-upload-then-masked-write', b'DRA2GS02' + record(0, initial) + wide_upload + masked + record(6, wide_image), 0),
               ('direct-write', b'DRA2GS02' + record(0, initial) + direct + record(6, direct_image), 0),
               ('upload-then-masked-write', b'DRA2GS02' + record(0, initial) + upload + masked + record(6, masked_image), 0)]
-    expected = {'odd-24bit-upload': odd24_image, 'gpu-upload-then-masked-write': wide_image, 'native-upload': image, 'direct-write': direct_image,
+    expected = {'v3-native-upload': image, 'odd-24bit-upload': odd24_image, 'gpu-upload-then-masked-write': wide_image, 'native-upload': image, 'direct-write': direct_image,
                 'gif-image-partial': image, 'gif-image-odd24': odd24_image,
                 'fifo-partial-and-tail': fifo_image, 'fifo-tail-only': bytearray(b'\x11\x22\x33\x44' * 2 + bytes(8) + b'\x11\x22\x33\x44') + bytes(VRAM - 20),
                 'upload-then-masked-write': masked_image}

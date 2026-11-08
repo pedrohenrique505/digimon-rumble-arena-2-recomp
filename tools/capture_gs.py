@@ -6,11 +6,13 @@ ROOT=Path(__file__).resolve().parents[1]
 def finalize(source,dest):
  end=None;counts={}
  with source.open('rb') as stream:
-  if stream.read(8)!=b'DRA2GS02':raise ValueError('invalid GS capture header')
+  magic=stream.read(8)
+  if magic not in (b'DRA2GS02',b'DRA2GS03'):raise ValueError('invalid GS capture header')
   while header:=stream.read(8):
    if len(header)!=8:break
    kind,size=struct.unpack('<II',header)
    if kind>11 or size>16*1024*1024:raise ValueError('invalid GS capture record')
+   if kind==5 and size!=(64 if magic==b'DRA2GS03' else 56):raise ValueError('invalid latch size for capture version')
    if len(stream.read(size))!=size:break
    counts[kind]=counts.get(kind,0)+1
    if kind==6:end=stream.tell()
@@ -19,7 +21,7 @@ def finalize(source,dest):
   remaining=end
   while remaining:
    block=src.read(min(remaining,1024*1024));dst.write(block);remaining-=len(block)
- return dict(original_bytes=source.stat().st_size,complete_bytes=end,discarded_tail_bytes=source.stat().st_size-end,record_counts_before_trimming=counts)
+ return dict(capture_format=magic.decode(),original_bytes=source.stat().st_size,complete_bytes=end,discarded_tail_bytes=source.stat().st_size-end,record_counts_before_trimming=counts)
 def main():
  p=argparse.ArgumentParser(description=__doc__);p.add_argument('output',type=Path);p.add_argument('--seconds',type=float,default=35);p.add_argument('--inputs',type=Path,help='JSON list: seconds, key, hold (seconds); xdotool focuses only the game PID');p.add_argument('--binary',type=Path,default=ROOT/'build/dra2');a=p.parse_args()
  if not 10<=a.seconds<=120:p.error('duration must be between 10 and 120 seconds')

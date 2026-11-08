@@ -334,6 +334,7 @@ public:
             return;
         const GSRegisters &priv = m_runtime.memory().gs();
         auto &p = m_gpu.get_priv_register_state();
+        std::memcpy(&p.smode1, &priv.smode1, 8);
         std::memcpy(&p.pmode, &priv.pmode, 8);
         std::memcpy(&p.smode2, &priv.smode2, 8);
         std::memcpy(&p.dispfb1, &priv.dispfb1, 8);
@@ -349,19 +350,29 @@ public:
         info.force_progressive = true;
         info.anti_blur = true;
         info.adapt_to_internal_horizontal_resolution = true;
-        m_gpu.vsync(info);
+        auto scanout = m_gpu.vsync(info);
+        if (scanout.image)
+        {
+            if (++m_stats.scanoutImages == 1)
+                std::fprintf(stderr, "[dra2-gs] primeiro scanout %ux%u smode1=0x%llx\n",
+                             scanout.image->get_width(), scanout.image->get_height(),
+                             (unsigned long long)priv.smode1);
+        }
+        else
+            m_stats.emptyScanouts++;
         m_gpu.flush();
         m_device.next_frame_context();
         m_stats.latches++;
         if (m_stats.latches % 300 == 0)
             std::fprintf(stderr,
-                         "[dra2-gs] shadow latches=%llu gif=%llu nativeFallbacks=%llu fifoReq=%llu fifoBytes=%llu\n",
+                         "[dra2-gs] shadow latches=%llu gif=%llu nativeFallbacks=%llu fifoReq=%llu fifoBytes=%llu scanoutImages=%llu emptyScanouts=%llu\n",
                          (unsigned long long)m_stats.latches, (unsigned long long)m_stats.gifPackets,
                          (unsigned long long)m_stats.nativeFallbacks, (unsigned long long)m_stats.fifoRequests,
-                         (unsigned long long)m_stats.fifoBytes);
+                         (unsigned long long)m_stats.fifoBytes,
+                         (unsigned long long)m_stats.scanoutImages, (unsigned long long)m_stats.emptyScanouts);
     }
 
-    struct Stats { uint64_t gifPackets = 0, nativeFallbacks = 0, fifoRequests = 0, fifoBytes = 0, latches = 0; } m_stats;
+    struct Stats { uint64_t gifPackets = 0, nativeFallbacks = 0, fifoRequests = 0, fifoBytes = 0, latches = 0, scanoutImages = 0, emptyScanouts = 0; } m_stats;
 
 private:
     PS2Runtime &m_runtime;

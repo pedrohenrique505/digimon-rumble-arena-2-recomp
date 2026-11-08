@@ -1,0 +1,39 @@
+From 672759d9534208a07f5cf5751b6b877a7001b95f Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sun, 8 Nov 2026 15:58:40 -0300
+Subject: [PATCH] ps2xRuntime: preservar SMODE1 nos latches da captura GS v3
+
+---
+ ps2xRuntime/include/runtime/ps2_gs_capture.h | 2 +-
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp       | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/ps2_gs_capture.h b/ps2xRuntime/include/runtime/ps2_gs_capture.h
+index 7f81536..0520c5d 100644
+--- a/ps2xRuntime/include/runtime/ps2_gs_capture.h
++++ b/ps2xRuntime/include/runtime/ps2_gs_capture.h
+@@ -42,7 +42,7 @@ inline void init(const void *vram, uint32_t size)
+     file = std::fopen(std::getenv("PS2X_GS_CAPTURE"), "wx");
+     if (!file)
+         throw std::runtime_error("GS capture requires a new writable file");
+-    std::fwrite("DRA2GS02", 1, 8, file);
++    std::fwrite("DRA2GS03", 1, 8, file);
+     record(0, vram, size);
+     std::fflush(file);
+     std::atexit(
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 7d5c49c..fb7ed73 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -537,7 +537,7 @@ void GS::latchHostPresentationFrame()
+     std::unique_lock<std::recursive_mutex> captureLock(gscapture::mutex,std::defer_lock);
+     if(gscapture::enabled()) { captureState.lock(); captureLock.lock(); }
+     if(gscapture::file && m_privRegs) {
+-        uint64_t regs[]={m_privRegs->pmode,m_privRegs->smode2,m_privRegs->dispfb1,m_privRegs->display1,m_privRegs->dispfb2,m_privRegs->display2,m_privRegs->bgcolor};
++        uint64_t regs[]={m_privRegs->pmode,m_privRegs->smode2,m_privRegs->dispfb1,m_privRegs->display1,m_privRegs->dispfb2,m_privRegs->display2,m_privRegs->bgcolor,m_privRegs->smode1};
+         gscapture::record(5,regs,sizeof(regs));
+     }
+ 
+-- 
+2.56.0
+

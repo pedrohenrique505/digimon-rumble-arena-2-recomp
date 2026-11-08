@@ -2,6 +2,7 @@
 #include "runtime/gs/gs_cpu_backend.h"
 #include "runtime/gs/gs_frontend.h"
 #include "runtime/ps2_memory.h"
+#include <algorithm>
 #include <array>
 #include <cfenv>
 #include <chrono>
@@ -27,12 +28,13 @@ struct Record
     uint32_t kind;
     std::vector<uint8_t> data;
 };
-static std::vector<Record> load(const char *path)
+static std::vector<Record> load(const char *path, bool &hasSmode1)
 {
     std::ifstream f(path, std::ios::binary);
     char magic[8];
-    if (!f.read(magic, 8) || std::memcmp(magic, "DRA2GS02", 8))
+    if (!f.read(magic, 8) || (std::memcmp(magic, "DRA2GS02", 8) && std::memcmp(magic, "DRA2GS03", 8)))
         throw std::runtime_error("invalid capture header");
+    hasSmode1 = !std::memcmp(magic, "DRA2GS03", 8);
     std::vector<Record> records;
     size_t bytes = 0;
     for (;;)
@@ -44,6 +46,8 @@ static std::vector<Record> load(const char *path)
         if (f.gcount() != 8 || h[0] > 11 || h[1] > 16 * 1024 * 1024 ||
             (bytes += h[1] + 8) > 512 * 1024 * 1024)
             throw std::runtime_error("invalid/truncated capture record");
+        if (h[0] == 5 && h[1] != (hasSmode1 ? 64u : 56u))
+            throw std::runtime_error("invalid latch size for capture version");
         Record r{h[0], std::vector<uint8_t>(h[1])};
         if (h[1] && !f.read(reinterpret_cast<char *>(r.data.data()), h[1]))
             throw std::runtime_error("truncated capture payload");
@@ -105,7 +109,7 @@ static void saveDisplay(const std::string &path, std::vector<uint8_t> &vram,
 #ifdef DRA2_PARALLEL_GS
 // Diagnostic readback only. Never use this synchronous path for live presentation.
 static void saveScanout(Vulkan::Device &device, const ParallelGS::ScanoutResult &scanout,
-                        const std::string &prefix, uint64_t latch)
+                        const std::string &prefix, uint64_t latch, bool assumeNtsc, uint64_t smode1)
 {
     if (!scanout.image)
         throw std::runtime_error("last latch has no scanout image");
@@ -150,7 +154,9 @@ static void saveScanout(Vulkan::Device &device, const ParallelGS::ScanoutResult 
          << ",\"internal_height\":" << scanout.internal_height
          << ",\"mode_width\":" << scanout.mode_width << ",\"mode_height\":" << scanout.mode_height
          << ",\"interlaced\":" << (scanout.interlaced ? "true" : "false")
-         << ",\"video_mode_source\":\"explicit-ntsc-assumption\",\"force_progressive\":true,\"anti_blur\":true,\"visual_equivalence_approved\":false}\n";
+         << ",\"smode1\":" << smode1
+         << ",\"video_mode_source\":\"" << (assumeNtsc ? "explicit-ntsc-assumption" : "captured-smode1")
+         << "\",\"force_progressive\":true,\"anti_blur\":true,\"visual_equivalence_approved\":false}\n";
     if (!meta)
         throw std::runtime_error("scanout metadata write failed");
 }
@@ -159,21 +165,24 @@ int main(int argc, char **argv)
 try
 {
     if (argc < 3)
-        throw std::runtime_error("usage: dra2-gs-replay capture output-prefix [--checkpoints] [--scanout-ntsc] (new files)");
-    bool checkpoints = false, exportScanout = false;
+        throw std::runtime_error("usage: dra2-gs-replay capture output-prefix [--checkpoints] [--scanout | --scanout-ntsc] (new files)");
+    bool checkpoints = false, exportScanout = false, assumeNtsc = false;
     for (int i = 3; i < argc; i++)
     {
         const std::string option = argv[i];
         if (option == "--checkpoints" && !checkpoints)
             checkpoints = true;
-        else if (option == "--scanout-ntsc" && !exportScanout)
+        else if ((option == "--scanout" || option == "--scanout-ntsc") && !exportScanout)
+        {
             exportScanout = true;
+            assumeNtsc = option == "--scanout-ntsc";
+        }
         else
             throw std::runtime_error("unknown or repeated option: " + option);
     }
 #ifndef DRA2_PARALLEL_GS
     if (exportScanout)
-        throw std::runtime_error("--scanout-ntsc requires the Vulkan replay");
+        throw std::runtime_error("scanout export requires the Vulkan replay");
 #endif
     for (const char *suffix : {".vram", ".ppm", ".scanout.ppm", ".scanout.json"})
         if (std::filesystem::exists(std::string(argv[2]) + suffix))
@@ -181,16 +190,20 @@ try
     const std::string checkpointDir = std::string(argv[2]) + ".checkpoints";
     if (checkpoints && !std::filesystem::create_directory(checkpointDir))
         throw std::runtime_error("checkpoint directory already exists");
-    auto records = load(argv[1]);
+    bool hasSmode1 = false;
+    auto records = load(argv[1], hasSmode1);
+    if (exportScanout && !assumeNtsc && !hasSmode1)
+        throw std::runtime_error("--scanout requires DRA2GS03 with SMODE1; legacy diagnostic: --scanout-ntsc");
     std::vector<uint8_t> vram = records.front().data;
     GSRegisters priv{};
     GS gs;
     gs.init(vram.data(), vram.size(), &priv);
     uint64_t frames = 0, references = 0, mismatchingReferences = 0, differentBytes = 0, readbacks = 0,
-             clears = 0, directWrites = 0, nativeUploadFallbacks = 0;
+             clears = 0, directWrites = 0, nativeUploadFallbacks = 0, scanoutImages = 0, emptyScanouts = 0;
     double work = 0, sync = 0, validation = 0;
     std::vector<uint8_t> result(VRAM);
     std::array<uint64_t, 7> display{};
+    uint64_t smode1 = 0;
 #ifdef DRA2_PARALLEL_GS
     if (!Vulkan::Context::init_loader(nullptr))
         throw std::runtime_error("Vulkan loader unavailable");
@@ -419,11 +432,19 @@ try
             throw std::runtime_error("orphan upload payload");
         case 5:
         {
-            display = values<uint64_t, 7>(r);
+            if (hasSmode1)
+            {
+                auto v = values<uint64_t, 8>(r);
+                std::copy_n(v.begin(), 7, display.begin());
+                smode1 = v[7];
+            }
+            else
+                display = values<uint64_t, 7>(r);
             frames++;
 #ifdef DRA2_PARALLEL_GS
             auto &p = gpu.get_priv_register_state();
-            if (exportScanout)
+            std::memcpy(&p.smode1, &smode1, 8);
+            if (assumeNtsc)
             {
                 // Legacy captures omit SMODE1. Explicit diagnostic assumption,
                 // never silently infer a video mode from the ELF region.
@@ -446,11 +467,16 @@ try
             info.anti_blur = true;
             info.adapt_to_internal_horizontal_resolution = true;
             auto scanout = gpu.vsync(info);
+            if (scanout.image)
+                scanoutImages++;
+            else
+                emptyScanouts++;
             if (exportScanout)
                 lastScanout = std::move(scanout);
             gpu.flush();
             device.next_frame_context();
 #else
+            priv.smode1 = smode1;
             priv.pmode = display[0];
             priv.smode2 = display[1];
             priv.dispfb1 = display[2];
@@ -675,7 +701,9 @@ try
     if (exportScanout)
     {
         auto start = Clock::now();
-        saveScanout(device, lastScanout, argv[2], frames);
+        uint64_t effectiveSmode1 = 0;
+        std::memcpy(&effectiveSmode1, &gpu.get_priv_register_state().smode1, 8);
+        saveScanout(device, lastScanout, argv[2], frames, assumeNtsc, effectiveSmode1);
         scanoutExport = seconds(start);
     }
 #endif
@@ -688,6 +716,7 @@ try
               << ",\"readbacks\":" << readbacks
               << ",\"direct_writes\":" << directWrites
               << ",\"native_upload_fallbacks\":" << nativeUploadFallbacks
+              << ",\"scanout_images\":" << scanoutImages << ",\"empty_scanouts\":" << emptyScanouts
               << ",\"scanout_export_seconds\":" << scanoutExport
               << ",\"work_seconds\":" << work
               << ",\"sync_seconds\":" << sync << ",\"validation_seconds\":" << validation << "}\n";

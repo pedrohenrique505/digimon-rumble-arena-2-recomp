@@ -1,6 +1,6 @@
 # Captura GS e replay experimental
 
-Formato `DRA2GS02`, little endian, Linux x86-64. Cada registro tem dois `uint32_t`
+Formato atual `DRA2GS03`, little endian, Linux x86-64; leitura compatível com `DRA2GS02`. Cada registro tem dois `uint32_t`
 (tipo e tamanho), seguidos pelo payload. Limite da captura: 512 MiB. Os dados
 são derivados do jogo: somente em `.cache/`, nunca no git.
 
@@ -10,7 +10,7 @@ são derivados do jogo: somente em `.cache/`, nunca no git.
 | 1 | Pacote GIF aceito pelo frontend; inclui os uploads IMAGE |
 | 2 | Dois u64: endereço do registrador, valor |
 | 3, 4 | Quatro u64 de BITBLTBUF/TRXPOS/TRXREG/TRXDIR, seguidos por registro 4 com upload nativo |
-| 5 | Sete u64: PMODE, SMODE2, DISPFB1, DISPLAY1, DISPFB2, DISPLAY2, BGCOLOR; evento de latch |
+| 5 | V2: sete u64 PMODE, SMODE2, DISPFB1, DISPLAY1, DISPFB2, DISPLAY2, BGCOLOR. V3: os mesmos sete seguidos por SMODE1 (oito u64); evento de latch |
 | 6 | Referência de 4 MiB de VRAM, a cada 30 latches |
 | 7 | Dois u32: índice de contexto, cor do clear HLE |
 | 8 | Um u32: consumo local/host solicitado |
@@ -43,8 +43,7 @@ Uploads nativos com tamanho em bits não múltiplo de 64 usam transferência CPU
 sobre esse mesmo mapeamento para preservar o último word parcial. O caminho
 GIF IMAGE geral ainda precisa de cobertura para esses tamanhos.
 `--checkpoints` exporta PPM e posição de evento/latch em uma pasta nova por
-referência, com custo incluído somente em `validation_seconds`. O formato
-da captura permanece inalterado.
+referência, com custo incluído somente em `validation_seconds`. O formato do checkpoint permanece inalterado.
 
 Snapshots VU `DRA2VU01` são nativos e privados à mesma revisão/build: cabeçalho
 com sizeof(interpreter), tamanhos de código/dados e orçamento; estado completo
@@ -69,3 +68,22 @@ o JSON inclui dimensões internas/do modo, latch, interlace e a origem da
 hipótese. Ausência de imagem é erro. O readback síncrono final fica em
 `scanout_export_seconds`; a execução de scanout continua em `work_seconds`.
 Essa rodada não deve substituir a matriz histórica de benchmark.
+
+### Captura V3: estado de vídeo preservado
+
+O cabeçalho `DRA2GS03` exige latch de 64 bytes; V2 exige 56 bytes. O replay e
+o finalizador rejeitam misturas de versão e tamanho. Os demais eventos são
+idênticos. O writer atual produz V3; não reescreva o cabeçalho de capturas V2
+para tentar recuperar SMODE1 ausente.
+
+`--scanout` exige V3 e usa SMODE1 capturado, registrando
+`video_mode_source=captured-smode1` e o valor do registrador no JSON.
+`--scanout-ntsc` continua sendo uma hipótese explícita para diagnóstico legado;
+as duas opções são mutuamente exclusivas. Cada `vsync` Vulkan é contabilizado
+em `scanout_images` ou `empty_scanouts`, mesmo sem exportação. A contagem de
+imagens não garante conteúdo correto nem mede apresentações únicas. Na CPU
+esses dois contadores são zero, pois não há chamada ao vsync Vulkan.
+
+O HLE atual preenche SMODE1 para CRT IDs `0x02`/`0x03` (NTSC/PAL); não emula
+todos os modos BIOS. `sceGsResetGraph` delega ao mesmo HLE nos modos 0 e 5.
+Capturar o valor derivado pelo HLE não prova equivalência ao BIOS original.
