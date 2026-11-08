@@ -1,0 +1,152 @@
+From 6ff2391835194067eebfe9c1cf4f5f5a8da1fa3e Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sun, 8 Nov 2026 14:38:20 -0300
+Subject: [PATCH] ps2xRuntime: costura GSGifSink pos-arbitragem no frontend GS
+
+---
+ ps2xRuntime/include/runtime/gs/gs_frontend.h | 20 ++++++++++++++++++++
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp       | 20 ++++++++++++++++++++
+ 2 files changed, 40 insertions(+)
+
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index 4c3f641..615cbee 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -96,6 +96,23 @@ struct GSDebugHistoryEntry
+     bool usedPreferred = false;
+ };
+ 
++// Optional post-arbitration GIF observer. Installed sinks receive the exact
++// stream the CPU frontend consumes, in order, without altering behavior.
++struct GSGifSink
++{
++    virtual ~GSGifSink() = default;
++    virtual void onGifPacket(const uint8_t *data, uint32_t sizeBytes) = 0;
++    virtual void onRegister(uint8_t regAddr, uint64_t value) = 0;
++    virtual void onNativeUpload(uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg,
++                                uint64_t trxdir, const uint8_t *data, uint32_t sizeBytes) = 0;
++    virtual void onLocalToHostRequest(uint32_t maxBytes) = 0;
++    virtual void onClear(uint32_t contextIndex, uint32_t rgba) = 0;
++    virtual void onDirectWrite(uint32_t psm, uint32_t base, uint32_t bw,
++                               uint32_t x, uint32_t y, uint32_t value) = 0;
++    virtual void onReset() = 0;
++    virtual void onLatch() = 0;
++};
++
+ class GS
+ {
+ public:
+@@ -105,6 +122,8 @@ public:
+     void init(uint8_t *vram, uint32_t vramSize, struct GSRegisters *privRegs = nullptr);
+     void reset();
+     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
++    void setGifSink(GSGifSink *sink) { m_gifSink = sink; }
++    GSGifSink *gifSink() const { return m_gifSink; }
+ 
+     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+     bool processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+@@ -242,6 +261,7 @@ private:
+     bool m_debugHistoryPaused = true;
+ 
+     std::unique_ptr<GSRasterBackend> m_backend;
++    GSGifSink *m_gifSink = nullptr;
+ };
+ 
+ #endif
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 42cd0cd..7d5c49c 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -130,6 +130,8 @@ void GS::reset()
+ {
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     gscapture::Event capture(10,nullptr,0);
++    if (m_gifSink)
++        m_gifSink->onReset();
+     std::memset(m_ctx, 0, sizeof(m_ctx));
+     m_prim = {};
+     m_primRegister = {};
+@@ -539,6 +541,8 @@ void GS::latchHostPresentationFrame()
+         gscapture::record(5,regs,sizeof(regs));
+     }
+ 
++    if (m_gifSink)
++        m_gifSink->onLatch();
+     ps2perf::Scope perfScope(ps2perf::GS);
+     GSPresentationRequest request{};
+     {
+@@ -667,6 +671,8 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+         return;
+ 
+     gscapture::Event capture(1, data, sizeBytes);
++    if (m_gifSink)
++        m_gifSink->onGifPacket(data, sizeBytes);
+     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
+         return;
+ 
+@@ -775,6 +781,8 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+         return false;
+ 
+     gscapture::Event capture(1, data, sizeBytes);
++    if (m_gifSink)
++        m_gifSink->onGifPacket(data, sizeBytes);
+     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
+                                                 {
+         m_curQ = 1.0f;
+@@ -822,6 +830,8 @@ void GS::uploadImageNative(uint64_t bitbltbuf,
+     uint64_t regs[]={bitbltbuf,trxpos,trxreg,trxdir};
+     gscapture::Event capture(3, regs, sizeof(regs));
+     if(gscapture::file) gscapture::record(4, data, sizeBytes);
++    if (m_gifSink)
++        m_gifSink->onNativeUpload(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
+     uploadImageNativeUnlocked(bitbltbuf, trxpos, trxreg, trxdir, data, sizeBytes);
+ }
+ 
+@@ -1103,6 +1113,8 @@ void GS::writeRegister(uint8_t regAddr, uint64_t value)
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     uint64_t reg[]={regAddr,value};
+     gscapture::Event capture(2, reg, sizeof(reg));
++    if (m_gifSink)
++        m_gifSink->onRegister(regAddr, value);
+     writeRegisterUnlocked(regAddr, value);
+ }
+ 
+@@ -1663,6 +1675,8 @@ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     uint32_t clear[]={contextIndex,rgba};
+     gscapture::Event capture(7,clear,sizeof(clear));
++    if (m_gifSink)
++        m_gifSink->onClear(contextIndex, rgba);
+     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
+ }
+ 
+@@ -1671,6 +1685,8 @@ bool GS::clearActiveFramebuffer(uint32_t rgba)
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     uint32_t clear[]={m_prim.ctxt ? 1u : 0u,rgba};
+     gscapture::Event capture(7,clear,sizeof(clear));
++    if (m_gifSink)
++        m_gifSink->onClear(m_prim.ctxt ? 1u : 0u, rgba);
+     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
+ }
+ 
+@@ -1679,6 +1695,8 @@ uint32_t GS::consumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+     ps2perf::Scope perfScope(ps2perf::GS);
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     gscapture::Event capture(8,&maxBytes,sizeof(maxBytes));
++    if (m_gifSink)
++        m_gifSink->onLocalToHostRequest(maxBytes);
+     return m_backend ? m_backend->ConsumeLocalToHostBytes(dst, maxBytes) : 0u;
+ }
+ 
+@@ -1722,6 +1740,8 @@ void GS::WriteVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_
+     std::lock_guard<std::recursive_mutex> lock(m_stateMutex);
+     uint32_t values[]={psm,base,bw,x,y,value};
+     gscapture::Event capture(9,values,sizeof(values));
++    if (m_gifSink)
++        m_gifSink->onDirectWrite(psm, base, bw, x, y, value);
+     if (m_backend)
+         m_backend->WriteVram(psm, base, bw, x, y, value);
+ }
+-- 
+2.56.0
+
