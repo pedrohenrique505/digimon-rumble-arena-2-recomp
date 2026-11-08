@@ -72,12 +72,19 @@ with tempfile.TemporaryDirectory(prefix='dra2-capture-test-') as directory:
     for name, data, code in tests:
         capture = root / (name + '.gs')
         capture.write_bytes(data)
-        result = subprocess.run([str(binary), str(capture), str(root / name)] + (['--checkpoints'] if name == 'native-upload' else []), capture_output=True, text=True)
+        result = subprocess.run([str(binary), str(capture), str(root / name)] + (['--checkpoints'] if name in ('native-upload', 'reference-mismatch') else []), capture_output=True, text=True)
         assert result.returncode == code, (name, result.returncode, result.stdout, result.stderr)
         if name == 'reference-mismatch':
             assert json.loads(result.stdout)['mismatching_references'] == 1
+            metadata = json.loads((root / (name + '.checkpoints') / '1.json').read_text())
+            pages = metadata['vram_page_differences']
+            assert metadata['vram_page_size'] == 8192 and len(pages) == 512
+            assert sum(pages) == metadata['different_bytes'] == 1
+            assert pages[-1] == 1 and sum(pages[:-1]) == 0
         if name == 'native-upload':
             assert (root / (name + '.checkpoints') / '1.ppm').is_file()
+            metadata = json.loads((root / (name + '.checkpoints') / '1.json').read_text())
+            assert metadata['vram_page_differences'] == [0] * 512
         if code == 0 and name != 'reference-mismatch':
             output = json.loads(result.stdout)
             assert output['references'] == 1 and output['different_bytes'] == 0, (name, output, (root / (name + '.vram')).read_bytes()[:32].hex())

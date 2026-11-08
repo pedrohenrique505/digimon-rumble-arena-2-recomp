@@ -514,7 +514,18 @@ try
                 saveDisplay(prefix + ".ppm", result, display);
                 std::ofstream metadata(prefix + ".json");
                 metadata << "{\"record\":" << index << ",\"latch\":" << frames
-                         << ",\"different_bytes\":" << different << "}\n";
+                         << ",\"different_bytes\":" << different
+                         << ",\"vram_page_size\":8192,\"vram_page_differences\":[";
+                // GS pages are 8 KiB. Keep physical addresses: a page can alias
+                // framebuffer, depth and texture data, so do not assign an owner.
+                for (size_t page = 0; page < VRAM / 8192; page++)
+                {
+                    size_t count = 0;
+                    for (size_t i = page * 8192; i < (page + 1) * 8192; i++)
+                        count += result[i] != r.data[i];
+                    metadata << (page ? "," : "") << count;
+                }
+                metadata << "]}" << '\n';
                 if (!metadata)
                     throw std::runtime_error("checkpoint metadata write failed");
             }
