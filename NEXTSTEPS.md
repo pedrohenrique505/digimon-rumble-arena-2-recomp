@@ -273,3 +273,17 @@ A exportação diagnóstica agora produz imagem e metadados sob hipótese NTSC
 explícita, com teste integral de pixels. Próximo passo da integração: preencher
 o modo de vídeo no HLE e preservá-lo no shadow/captura antes de conectar a janela.
 [Análise e validação](progression/2026-11-08-parallelgs-scanout-diagnostico.md).
+
+## CRT corrigido e captura V3 (08/11)
+
+O estado SMODE1 agora é preenchido pelo HLE SetGsCrt para NTSC/PAL, inclusive
+pelo caminho `sceGsResetGraph` que o jogo usa. A captura nova `DRA2GS03`
+preserva o registrador, o shadow o copia e `--scanout` exporta a imagem sem
+hipótese NTSC. O teste real confirmou a primeira imagem GPU 640×448 após a
+configuração CRT. Compatibilidade de leitura V2 preservada. Detalhes e limites:
+[CRT e captura V3](progression/2026-11-08-parallelgs-crt-e-captura-v3.md).
+
+A pendência de SMODE1 registrada acima foi resolvida para os modos TV cobertos.
+A próxima etapa segue sendo validar a imagem e conectar a apresentação à
+janela, com dispositivo/contexto e threads explícitos. Medir novamente scanout
+válido e apresentação antes de atribuir ganho de FPS ao jogo.

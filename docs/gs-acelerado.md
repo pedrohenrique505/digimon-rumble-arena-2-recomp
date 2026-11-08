@@ -231,3 +231,30 @@ A captura longa produziu scanout 640×448 no latch 660 com essa opção.
 A regressão sintética verifica todos os pixels de uma imagem uniforme 640×224,
 metadados, ausência de imagem e proteção de arquivos existentes. Os 15 casos
 anteriores continuam passando em CPU e Vulkan.
+
+## Estado de vídeo corrigido e captura V3
+
+Os patches 0017–0019 preenchem SMODE1 para NTSC/PAL no HLE SetGsCrt,
+registram esse estado nos latches e conectam `sceGsResetGraph` ao syscall.
+O shadow copia SMODE1 e informa a primeira imagem e os totais
+`scanoutImages`/`emptyScanouts`. Imagens vazias antes de o jogo configurar CRT
+são possíveis; nenhum modo é inferido automaticamente.
+
+```bash
+cmake --build build --target dra2 dra2-test-gs-crt -j3
+build/dra2-test-gs-crt
+# Produzir uma captura nova com tools/capture_gs.py (DRA2GS03).
+.cache/gs-replay-build/dra2-gs-replay-vulkan captura-v3.gs .cache/scanout-v3 --scanout --checkpoints
+python3 tools/test_gs_capture_finalize.py
+```
+
+A opção `--scanout` usa o SMODE1 da captura e registra
+`video_mode_source=captured-smode1`; `--scanout-ntsc` conserva seu caráter de
+hipótese diagnóstica. Capturas V2 continuam reproduzíveis, mas não contêm esse
+estado e são recusadas por `--scanout`. A correção cobre o modo TV utilizado
+pelo jogo e PAL; outros CRT IDs deixam SMODE1 inválido e recebem diagnóstico,
+sem reutilizar um modo anterior. Não há tabela completa de modos BIOS.
+
+A análise e a validação ao vivo estão no
+[diário do CRT e da captura V3](../progression/2026-11-08-parallelgs-crt-e-captura-v3.md).
+Apresentação na janela e equivalência visual continuam pendentes.
