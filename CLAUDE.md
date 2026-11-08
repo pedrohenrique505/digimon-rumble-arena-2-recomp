@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Recompilação estática de **Digimon Rumble Arena 2** (PS2 NTSC-U, `SLUS-21067`, VER 1.02) para um executável nativo. O alvo por enquanto é só Linux. O código MIPS R5900 do Emotion Engine vira C++, que é ligado a um runtime que substitui o hardware do PS2 (GS, VU1, IOP, SPU2). A documentação e os commits são em português.
 
-Estado atual: o autoload termina e a abertura chega ao título com logotipo renderizado. O menu de opções ainda falha: a compilação de `lua/menu` aborta, deixando as listas vazias. Há um teste que reproduz a normalização incorreta de um yield recursivo no dispatcher; a correção ainda não foi implementada. Antes de retomar, leia `progression/2026-11-07-compilador-lua-e-checkpoint.md`. Base: PS2Recomp (ran-j).
+Estado atual: o autoload termina e a abertura chega ao título. O patch 0013 corrige a perda de checkpoints recursivos; `lua/menu` agora compila e cria cinco opções, confirmadas na RAM e no vetor C++. O menu inicial foi renderizado e a seta direita mudou a seleção de 1 para 2. Restam defeitos visuais nas transições do carrossel; a entrada em partida não foi testada. Antes de retomar, leia `progression/2026-11-07-checkpoint-recursivo-corrigido.md`. Base: PS2Recomp (ran-j).
 
 ## Regra: pesquisar na internet ao encontrar problemas
 
