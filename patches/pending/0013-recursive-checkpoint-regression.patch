@@ -1,0 +1,64 @@
+From 0fb40934acbfc8eaaf29cb1effad8425d6fa6171 Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sat, 7 Nov 2026 19:45:54 -0300
+Subject: [PATCH] test: reproduzir retorno incorreto apos checkpoint recursivo
+
+---
+ ps2xTest/src/ps2_runtime_expansion_tests.cpp | 34 ++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/ps2xTest/src/ps2_runtime_expansion_tests.cpp b/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+index 4772f3f..3546df7 100644
+--- a/ps2xTest/src/ps2_runtime_expansion_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+@@ -157,6 +157,18 @@ namespace
+         }
+     }
+ 
++    void testGuestBranchRecursiveYieldHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        runtime->postEeEvent(EeEvent{EeEventType::VBlankStart});
++        runtime->dispatchGuestBranch(rdram, ctx, 0x3500u, 0x3504u, 0x350cu,
++                                     PS2Runtime::GuestBranchKind::DirectCall, "recursive-yield");
++    }
++
++    void testGuestBranchPostedEventHandler(uint8_t *, R5900Context *, PS2Runtime *runtime)
++    {
++        runtime->postEeEvent(EeEvent{EeEventType::VBlankStart});
++    }
++
+     void testGuestBranchTransferHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+     {
+         if (ctx)
+@@ -406,6 +418,28 @@ void register_ps2_runtime_expansion_tests()
+                      "callee should still execute normally");
+         });
+ 
++        tc.Run("recursive checkpoint yield is not an implicit call return", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            runtime.registerFunction(0x3500u, testGuestBranchRecursiveYieldHandler);
++            R5900Context ctx{};
++            const bool returned = runtime.dispatchGuestBranch(nullptr, &ctx, 0x3500u, 0x2000u, 0x2008u,
++                PS2Runtime::GuestBranchKind::DirectCall, "outer-recursive-call");
++            t.IsFalse(returned, "a recursive yield must unwind all native caller frames");
++            t.Equals(ctx.pc, 0x3500u, "the pending recursive entry must not be skipped");
++        });
++
++        tc.Run("posted event without a checkpoint preserves implicit HLE return", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            runtime.registerFunction(0x3600u, testGuestBranchPostedEventHandler);
++            R5900Context ctx{};
++            const bool returned = runtime.dispatchGuestBranch(nullptr, &ctx, 0x3600u, 0x2000u, 0x2008u,
++                PS2Runtime::GuestBranchKind::DirectCall, "posted-event-call");
++            t.IsTrue(returned, "posting an event alone must not cause HLE replay");
++            t.Equals(ctx.pc, 0x2008u, "the HLE caller must receive its fallthrough PC");
++        });
++
+         tc.Run("dispatchGuestBranch jump returns to central dispatcher without nesting", [](TestCase &t)
+         {
+             PS2Runtime runtime;
+-- 
+2.56.0
+

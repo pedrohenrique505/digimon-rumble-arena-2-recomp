@@ -79,3 +79,7 @@ compile_commands.json
 
 # Ferramentas externas clonadas (PS2Recomp, ps2n...)
 /external/
+
+# Cache dos utilitários Python
+__pycache__/
+*.py[cod]

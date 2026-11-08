@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Recompilação estática de **Digimon Rumble Arena 2** (PS2 NTSC-U, `SLUS-21067`, VER 1.02) para um executável nativo. O alvo por enquanto é só Linux. O código MIPS R5900 do Emotion Engine vira C++, que é ligado a um runtime que substitui o hardware do PS2 (GS, VU1, IOP, SPU2). A documentação e os commits são em português.
 
-Estado atual: o jogo roda o laço principal (IOP emulado com os IRX do jogo, leitura do disco, DMA de render por frame). O bloqueio atual é o pipeline VIF1/VU1 → GS. Veja o `progression/` mais recente. Base: PS2Recomp (ran-j).
+Estado atual: o autoload termina e a abertura chega ao título com logotipo renderizado. O menu de opções ainda falha: a compilação de `lua/menu` aborta, deixando as listas vazias. Há um teste que reproduz a normalização incorreta de um yield recursivo no dispatcher; a correção ainda não foi implementada. Antes de retomar, leia `progression/2026-11-07-compilador-lua-e-checkpoint.md`. Base: PS2Recomp (ran-j).
 
 ## Regra: pesquisar na internet ao encontrar problemas
 
@@ -88,7 +88,7 @@ Detalhes do export: o `ExportPS2Functions.java` (de `ran-j/PS2Recomp`) fica em `
 - **Correções por jogo** ficam em `runtime/overrides/` (código nosso, versionado), usando a API `game_overrides.h`: só se aplicam se ELF, entry e CRC32 (`0xA6702034`) baterem. Os bindings de endereço para handler são feitos em runtime (`replaceFunction`), sem recompilar o código gerado. As chamadas `jal` geradas passam por `runtime->dispatchGuestBranch`, então a substituição pega.
 - **Convenção dos handlers:** `ctx->pc = $ra` **antes** de chamar qualquer HLE do runtime, como fazem os stubs gerados. HLEs que guardam o contexto para retomar depois (ex.: `sceSifCallRpc` com callback) entram em laço se o `pc` ainda apontar para a função. Por isso os bindings do SDK passam pelo `sdkTrampoline`, e não pelo `bindAddressHandler` do upstream.
 - **Política: nós mesmos corrigimos.** Não abrimos issues nem PRs nos projetos upstream (PS2Recomp, plugins etc.). Todo bug encontrado é resolvido aqui e mantido no nosso repositório.
-- Correção por jogo vai em override. Correção **genérica** do runtime/IOP que não cabe num override vira **patch nosso** em `patches/ps2recomp/` (formato `git format-patch`, um por correção, aplicado pelo `tools/apply_upstream_patches.sh`). No clone há um branch local `dra2-patches` com um commit por patch: edite lá e regenere com `git format-patch -o patches/ps2recomp e563698..dra2-patches`. Ao atualizar o PS2Recomp, reaplique os patches e confira se algum já foi resolvido pelo próprio upstream.
+- Correção por jogo vai em override. Correção **genérica** do runtime/IOP que não cabe num override vira **patch nosso** em `patches/ps2recomp/` (formato `git format-patch`, um por correção, aplicado pelo `tools/apply_upstream_patches.sh`). No clone há um branch local `dra2-patches` com um commit por patch: edite lá e regenere com `git format-patch -o patches/ps2recomp e563698..dra2-patches`. Ao atualizar o PS2Recomp, reaplique os patches e confira se algum já foi resolvido pelo próprio upstream. `patches/pending/` guarda reproduções ainda não corrigidas; o script de aplicação não as inclui.
 
 ## Fatos do binário (para não redescobrir)
 

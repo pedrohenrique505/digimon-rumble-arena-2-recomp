@@ -8,11 +8,11 @@ O código MIPS R5900 do Emotion Engine é traduzido para C++ e ligado a um runti
 
 ## Estado
 
-**O jogo roda o laço principal.** O ELF inteiro recompila com o [PS2Recomp](https://github.com/ran-j/ps2recomp) (78.202 funções, 0 instruções não tratadas). Os 10 módulos IOP do jogo rodam no IOP emulado, o driver próprio do jogo lê o disco, e o jogo manda DMA de render todo frame. O bloqueio atual é o pipeline VIF1/VU1 → GS: o fim de frame ainda não chega ao GS.
+**O jogo chega à tela de título com o logotipo renderizado.** O ELF inteiro recompila com o [PS2Recomp](https://github.com/ran-j/ps2recomp) (78.202 funções, 0 instruções não tratadas). Os 10 módulos IOP rodam, o disco é lido e o pipeline VIF1/VU1 → GS renderiza a abertura. Foram corrigidos o alinhamento LQ/SQ e a paginação do memory card, permitindo concluir o autoload. A entrada no menu de opções ainda está em investigação: a compilação de `lua/menu` falha e deixa as listas vazias. Um teste reproduz um defeito de yield recursivo no dispatcher; a correção está pendente.
 
 Bugs encontrados no runtime/IOP do PS2Recomp são corrigidos por nós e mantidos como patches em [`patches/ps2recomp/`](patches/ps2recomp/).
 
-Veja [`progression/`](progression/) para o diário de progresso.
+Veja o [estado e próximo passo](progression/2026-11-07-compilador-lua-e-checkpoint.md) e o [diário completo](progression/) para os detalhes.
 
 ## Estrutura
 
