@@ -1,0 +1,155 @@
+From 92f2b57e7328cba96c26d4912e6abe7c88398736 Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sat, 7 Nov 2026 22:03:09 -0300
+Subject: [PATCH] ps2xRuntime: propagar checkpoints por chamadas recursivas
+
+---
+ ps2xRuntime/include/runtime/ee_scheduler.h   |  3 ++
+ ps2xRuntime/src/lib/Kernel/EeScheduler.cpp   |  3 ++
+ ps2xRuntime/src/lib/ps2_runtime.cpp          |  8 +++
+ ps2xTest/src/ps2_runtime_expansion_tests.cpp | 52 ++++++++++++++++++++
+ 4 files changed, 66 insertions(+)
+
+diff --git a/ps2xRuntime/include/runtime/ee_scheduler.h b/ps2xRuntime/include/runtime/ee_scheduler.h
+index 655ae33..c9abbfd 100644
+--- a/ps2xRuntime/include/runtime/ee_scheduler.h
++++ b/ps2xRuntime/include/runtime/ee_scheduler.h
+@@ -279,6 +279,8 @@ public:
+     void requestStop();
+     void postEvent(EeEvent event);
+     [[nodiscard]] bool checkpointDue(uint32_t cycles = kGeneratedCheckpointCycles) noexcept;
++    // EE-executor-only generation of checkpoints actually taken, not queued events.
++    [[nodiscard]] uint64_t checkpointGeneration() const noexcept { return m_checkpointGeneration; }
+     void accountCycles(uint32_t cycles) noexcept;
+     // Current deterministic EE cycle (the clock VBlank, timers and alarms run on).
+     [[nodiscard]] uint64_t eeCycle() const noexcept { return m_eeCycle; }
+@@ -429,6 +431,7 @@ private:
+     bool m_insideInterrupt = false;
+     uint32_t m_pendingEeTimerInterrupts = 0;
+     uint64_t m_eeCycle = 0;
++    uint64_t m_checkpointGeneration = 0;
+     uint64_t m_sliceEndCycle = kDefaultTimeSliceCycles;
+     std::thread::id m_executorThread{};
+     std::atomic<bool> m_running{false};
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+index 24150bf..c2a95de 100644
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -361,6 +361,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+     if (m_checkpointPending.load(std::memory_order_acquire) ||
+         m_stopRequested.load(std::memory_order_acquire))
+     {
++        ++m_checkpointGeneration;
+         return true;
+     }
+ 
+@@ -368,6 +369,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+     if (nextEventCycle != 0u && m_eeCycle >= nextEventCycle)
+     {
+         m_checkpointPending.store(true, std::memory_order_release);
++        ++m_checkpointGeneration;
+         return true;
+     }
+ 
+@@ -381,6 +383,7 @@ bool EeScheduler::checkpointDue(uint32_t cycles) noexcept
+     {
+         m_rescheduleRequested = true;
+         m_timeSliceExpired = true;
++        ++m_checkpointGeneration;
+         return true;
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+index 5dc4c05..9b9661e 100644
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -1405,8 +1405,16 @@ bool PS2Runtime::dispatchGuestBranch(uint8_t *rdram,
+ 
+     RecompiledFunction targetFn = lookupFunction(targetPc);
+     const uint32_t entryPc = ctx->pc;
++    const uint64_t checkpointGeneration = m_eeScheduler ? m_eeScheduler->checkpointGeneration() : 0u;
+     targetFn(rdram, ctx, this);
+ 
++    // A deeper recursive call can yield with the same PC as this call's entry
++    // (or fallthrough). Unwind before applying implicit HLE return compatibility.
++    if (m_eeScheduler && m_eeScheduler->checkpointGeneration() != checkpointGeneration)
++    {
++        return false;
++    }
++
+     if (isStopRequested() || ctx->pc == 0u)
+     {
+         return false;
+diff --git a/ps2xTest/src/ps2_runtime_expansion_tests.cpp b/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+index 4772f3f..52b261d 100644
+--- a/ps2xTest/src/ps2_runtime_expansion_tests.cpp
++++ b/ps2xTest/src/ps2_runtime_expansion_tests.cpp
+@@ -157,6 +157,25 @@ namespace
+         }
+     }
+ 
++    void testGuestBranchRecursiveYieldHandler(uint8_t *rdram, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        runtime->postEeEvent(EeEvent{EeEventType::VBlankStart});
++        runtime->dispatchGuestBranch(rdram, ctx, 0x3500u, 0x3504u, 0x350cu,
++                                     PS2Runtime::GuestBranchKind::DirectCall, "recursive-yield");
++    }
++
++    void testGuestBranchFallthroughYieldHandler(uint8_t *, R5900Context *ctx, PS2Runtime *runtime)
++    {
++        ctx->pc = 0x2008u;
++        runtime->postEeEvent(EeEvent{EeEventType::VBlankStart});
++        (void)runtime->eeCheckpointDue();
++    }
++
++    void testGuestBranchPostedEventHandler(uint8_t *, R5900Context *, PS2Runtime *runtime)
++    {
++        runtime->postEeEvent(EeEvent{EeEventType::VBlankStart});
++    }
++
+     void testGuestBranchTransferHandler(uint8_t *, R5900Context *ctx, PS2Runtime *)
+     {
+         if (ctx)
+@@ -406,6 +425,39 @@ void register_ps2_runtime_expansion_tests()
+                      "callee should still execute normally");
+         });
+ 
++        tc.Run("recursive checkpoint yield is not an implicit call return", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            runtime.registerFunction(0x3500u, testGuestBranchRecursiveYieldHandler);
++            R5900Context ctx{};
++            const bool returned = runtime.dispatchGuestBranch(nullptr, &ctx, 0x3500u, 0x2000u, 0x2008u,
++                PS2Runtime::GuestBranchKind::DirectCall, "outer-recursive-call");
++            t.IsFalse(returned, "a recursive yield must unwind all native caller frames");
++            t.Equals(ctx.pc, 0x3500u, "the pending recursive entry must not be skipped");
++        });
++
++        tc.Run("generated checkpoint at caller fallthrough still unwinds", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            runtime.registerFunction(0x3700u, testGuestBranchFallthroughYieldHandler);
++            R5900Context ctx{};
++            const bool returned = runtime.dispatchGuestBranch(nullptr, &ctx, 0x3700u, 0x2000u, 0x2008u,
++                PS2Runtime::GuestBranchKind::DirectCall, "fallthrough-yield");
++            t.IsFalse(returned, "PC equality must not swallow a generated checkpoint");
++            t.Equals(ctx.pc, 0x2008u, "the yielded PC must remain pending");
++        });
++
++        tc.Run("posted event without a checkpoint preserves implicit HLE return", [](TestCase &t)
++        {
++            PS2Runtime runtime;
++            runtime.registerFunction(0x3600u, testGuestBranchPostedEventHandler);
++            R5900Context ctx{};
++            const bool returned = runtime.dispatchGuestBranch(nullptr, &ctx, 0x3600u, 0x2000u, 0x2008u,
++                PS2Runtime::GuestBranchKind::DirectCall, "posted-event-call");
++            t.IsTrue(returned, "posting an event alone must not cause HLE replay");
++            t.Equals(ctx.pc, 0x2008u, "the HLE caller must receive its fallthrough PC");
++        });
++
+         tc.Run("dispatchGuestBranch jump returns to central dispatcher without nesting", [](TestCase &t)
+         {
+             PS2Runtime runtime;
+-- 
+2.56.0
+

@@ -7,9 +7,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 UP="${PS2RECOMP_DIR:-$ROOT/external/PS2Recomp}"
 for p in "$ROOT"/patches/ps2recomp/*.patch; do
   [ -e "$p" ] || continue
-  if git -C "$UP" apply --reverse --check "$p" 2>/dev/null; then
+  # Patches posteriores podem alterar somente o contexto de um patch anterior.
+  # Na verificação reversa, compare as linhas alteradas sem exigir esse contexto.
+  if git -C "$UP" apply --reverse --check -C0 "$p" 2>/dev/null; then
     echo "já aplicado: $(basename "$p")"
   else
-    git -C "$UP" apply "$p" && echo "aplicado:    $(basename "$p")"
+    git -C "$UP" apply "$p"
+    echo "aplicado:    $(basename "$p")"
   fi
 done
