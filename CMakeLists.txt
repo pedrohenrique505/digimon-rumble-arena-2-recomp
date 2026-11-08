@@ -109,3 +109,7 @@ endif()
 # Offline diagnostic tool; never part of the normal game target.
 add_executable(dra2-vu-replay EXCLUDE_FROM_ALL tools/vu_replay.cpp)
 target_link_libraries(dra2-vu-replay PRIVATE ps2_runtime)
+
+# Targeted HLE regression; no guest code or window required.
+add_executable(dra2-test-gs-crt EXCLUDE_FROM_ALL tools/test_gs_crt.cpp)
+target_link_libraries(dra2-test-gs-crt PRIVATE ps2_runtime)
