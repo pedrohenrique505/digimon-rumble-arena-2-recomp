@@ -197,7 +197,88 @@ try
 #ifdef DRA2_PARALLEL_GS
             if (r.data.size() % 16)
                 throw std::runtime_error("GIF packet is not qword aligned");
-            gpu.gif_transfer(1, r.data.data(), r.data.size());
+            {
+                // IMAGE uploads whose pixel bits are not a multiple of 64 lose
+                // the last partial word in the candidate. Route those payloads
+                // through the CPU transfer over synchronized VRAM.
+                auto load64 = [&](size_t at) {
+                    uint64_t v;
+                    std::memcpy(&v, r.data.data() + at, 8);
+                    return v;
+                };
+                uint64_t imgRegs[4] = {};
+                size_t segStart = 0, off = 0;
+                bool routed = false;
+                while (off + 16 <= r.data.size())
+                {
+                    const uint64_t tagLo = load64(off);
+                    const uint64_t tagHi = load64(off + 8);
+                    const uint32_t nloop = tagLo & 0x7fff;
+                    const unsigned flg = (tagLo >> 58) & 3;
+                    uint32_t nreg = (tagLo >> 60) & 0xf;
+                    if (!nreg)
+                        nreg = 16;
+                    off += 16;
+                    if (flg == 0)
+                    {
+                        for (uint32_t i = 0, n = nloop * nreg; i < n && off + 16 <= r.data.size(); i++, off += 16)
+                            if (((tagHi >> ((i % nreg) * 4)) & 0xf) == 0x0e &&
+                                (load64(off + 8) & 0xff) >= 0x50 && (load64(off + 8) & 0xff) <= 0x53)
+                                imgRegs[(load64(off + 8) & 0xff) - 0x50] = load64(off);
+                    }
+                    else if (flg == 1)
+                    {
+                        uint32_t count = nloop * nreg;
+                        for (uint32_t i = 0; i < count && off + 8 <= r.data.size(); i++, off += 8)
+                        {
+                            unsigned reg = (tagHi >> ((i % nreg) * 4)) & 0xf;
+                            // REGLIST addresses are register numbers, not A+D.
+                            (void)reg;
+                        }
+                        if (count & 1)
+                            off += 8;
+                    }
+                    else
+                    {
+                        uint32_t imageBytes = nloop * 16;
+                        if (off + imageBytes > r.data.size())
+                            imageBytes = r.data.size() - off;
+                        const unsigned dpsm = (imgRegs[0] >> 56) & 63;
+                        unsigned bpp = 0;
+                        switch (dpsm)
+                        {
+                        case 0: case 0x30: bpp = 32; break;
+                        case 1: case 0x31: bpp = 24; break;
+                        case 2: case 0xa: case 0x32: case 0x3a: bpp = 16; break;
+                        case 0x13: case 0x1b: bpp = 8; break;
+                        case 0x14: case 0x24: case 0x2c: bpp = 4; break;
+                        default: break;
+                        }
+                        const uint64_t bits = (imgRegs[2] & 0xfff) * ((imgRegs[2] >> 32) & 0xfff) * bpp;
+                        if ((imgRegs[3] & 3) == 0 && bpp && bits % 64)
+                        {
+                            routed = true;
+                            nativeUploadFallbacks++;
+                            if (off - 16 > segStart)
+                                gpu.gif_transfer(1, r.data.data() + segStart, off - 16 - segStart);
+                            gpu.flush();
+                            auto *mapped = static_cast<uint8_t *>(gpu.map_vram_write(0, VRAM));
+                            GSRegisters fbPriv{};
+                            GS fallback;
+                            fallback.init(mapped, VRAM, &fbPriv);
+                            fallback.uploadImageNative(imgRegs[0], imgRegs[1], imgRegs[2], imgRegs[3],
+                                                       r.data.data() + off, imageBytes);
+                            gpu.end_vram_write(0, VRAM);
+                            segStart = off + imageBytes;
+                        }
+                        off += imageBytes;
+                    }
+                }
+                if (!routed)
+                    gpu.gif_transfer(1, r.data.data(), r.data.size());
+                else if (segStart < r.data.size())
+                    gpu.gif_transfer(1, r.data.data() + segStart, r.data.size() - segStart);
+            }
 #else
             gs.processGIFPacket(r.data.data(), r.data.size());
 #endif
