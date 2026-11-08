@@ -6,13 +6,13 @@
    o custo com REA/GDB e o Ghidra conectado.
 2. **Concluído:** otimizar o arredondamento bilinear do GS, conferir equivalência,
    medir antes/depois e manter a mudança como patch local.
-3. **Pendente:** preparar um replay de primitivas da abertura/menu e reduzir
-   trabalho repetido em `WritePixel`/`SampleTexture` por primitiva. Comparar a VRAM
-   integral e o tempo do mesmo replay antes/depois.
-4. **Pendente:** investigar o interpretador VU1, especialmente os pipelines e
-   `XGKICK`, preservando a ordem VU → GIF → GS.
-5. **Pendente:** avaliar tracing desligado e, se necessário, um backend gráfico
-   acelerado. Cada mudança deve ser medida isoladamente.
+
+**Prioridade revisada após esta rodada:** medir o teto de ganho sem rasterização,
+provar a integração de um GS acelerado existente e atacar VU conforme o perfil.
+O roadmap vigente está em [NEXTSTEPS.md](../NEXTSTEPS.md). A redução local de
+trabalho em `WritePixel`/`SampleTexture` deixa de ser o próximo objetivo principal.
+As duas etapas concluídas acima são históricas; a numeração do novo roadmap
+identifica o trabalho estrutural ainda pendente.
 
 O jogo continua lento. Esta rodada não demonstra desempenho de uma partida,
 60 FPS nem correção dos defeitos visuais conhecidos do carrossel.

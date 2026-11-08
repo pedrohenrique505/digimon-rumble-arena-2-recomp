@@ -19,10 +19,35 @@ de 7,8 para 8,1–8,2 quadros/s. Isso não mede uma partida. Veja o
 
 Bugs encontrados no runtime/IOP do PS2Recomp são corrigidos por nós e mantidos como patches em [`patches/ps2recomp/`](patches/ps2recomp/).
 
-Veja o [estado e próximo passo](progression/2026-11-07-checkpoint-recursivo-corrigido.md) e o [diário completo](progression/) para os detalhes.
+Veja o [roadmap de implementação](NEXTSTEPS.md), o [estado funcional](progression/2026-11-07-checkpoint-recursivo-corrigido.md) e o [diário completo](progression/) para os detalhes.
+
+## Roadmap de FPS
+
+A prioridade é obter ganhos estruturais: avaliar um GS acelerado na GPU e
+substituir os microprogramas VU mais caros por implementações nativas, conforme
+as medições. O runtime atual desenha os pixels do GS na CPU; recompilar o EE
+não elimina esse custo. O objetivo é velocidade de simulação correta e cadência
+original; 60 quadros/s é a meta de trabalho a validar, não uma garantia.
+
+| Etapa | Estado | Implementação | Critério de avanço |
+| --- | --- | --- | --- |
+| 1 — Medir o teto | **Em progresso** | Cenários reproduzíveis, custo GS/VU/EE/IOP, modo sem rasterização e replay VU | Identificar quanto cada mudança pode recuperar, separando esperas e trabalho |
+| 2 — Provar GS acelerado | **Em progresso** | Avaliar paraLLEl-GS/Vulkan primeiro; comparar alternativa PCSX2; reproduzir um fluxo gráfico real | Cena correta e ganho múltiplo no custo GS, incluindo transferências e sync |
+| 3 — Integrar GPU | **Não iniciada** | Backend selecionável, coerência VRAM, transferências e apresentação direta | Abertura/menu acelerados, navegação preservada e fallback CPU |
+| 4 — Acelerar VU1 | **Não iniciada** | Identificar microprogramas com REA/Ghidra; traduzir os mais caros ou integrar recompilador | Saídas VU/GIF conferidas e redução de custo real; antecipar se VU dominar |
+| 5 — Validar o jogo | **Não iniciada** | Partida completa, áudio/entrada e medições sem debugger | Cadência e simulação corretas nas cenas testadas, com tempos mediano/p95 |
+
+**Progresso das etapas 1 e 2:** diagnóstico sem rasterização e replay CPU/Vulkan
+implementados. Em cinco pares do mesmo fluxo real, o GS isolado passou de
+49,37 s na CPU para 1,33 s na GPU (**37,25×**). Isso não é ganho de FPS do jogo:
+a GPU ainda não está integrada e a equivalência visual continua pendente.
+Veja os [resultados e limitações](progression/2026-11-07-gs-vulkan-replay-e-teto.md)
+e os [comandos reproduzíveis](docs/gs-acelerado.md). O aceite completo dessas
+etapas e o plano restante estão em [NEXTSTEPS.md](NEXTSTEPS.md).
 
 ## Estrutura
 
+- `NEXTSTEPS.md`: roadmap de implementação de desempenho e critérios de validação
 - `docs/`: pesquisa e documentação técnica ([ferramentas](docs/ferramentas.md))
 - `progression/`: registro do progresso do projeto, por data
 - `runtime/overrides/`: correções específicas do jogo (game overrides do PS2Recomp)
