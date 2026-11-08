@@ -22,7 +22,7 @@ com o estado indicado quando já existe implementação parcial.
 | --- | --- | --- | --- |
 | 1 — Medição e teto | **Em progresso** | Contadores exclusivos, modo sem rasterização, captura/replay VU, 20 execuções sem debugger | Estabilizar/comprovar todos os cenários, apresentações únicas, carregamentos e feedback de VRAM |
 | 2 — Prova GS acelerado | **Em progresso** | Avaliação paraLLEl-GS, captura real, replay CPU/Vulkan e ganho GS de 37,25× em cinco pares | Aprovar equivalência visual e concluir cobertura e custos da apresentação |
-| 3 — Integrar GPU ao jogo | **Em progresso** | Costura GSGifSink (patch 0016), adaptador shadow no jogo com FIFO/IMAGE do replay, seleção DRA2_GS_BACKEND | Apresentação GPU na janela, sinais a partir da GPU e promoção a backend autoritativo |
+| 3 — Integrar GPU ao jogo | **Em progresso** | Costura GSGifSink (patch 0016), adaptador shadow executado no jogo (60/120 s, sem crash), seleção DRA2_GS_BACKEND | Apresentação GPU na janela, sinais a partir da GPU e promoção a backend autoritativo |
 | 4 — Acelerar VU1 | **Não iniciada** | Instrumentação/replay preparatório pertence à etapa 1 | Inventário dos programas caros, substituição/recompilação e validação diferencial |
 | 5 — Validar partida e orçamento | **Não iniciada** | Nenhuma validação de partida nesta rodada | Partida completa, áudio/entrada, cadência original e orçamento de quadro |
 
@@ -51,10 +51,13 @@ Comandos e limites: [diagnóstico e replay acelerado](docs/gs-acelerado.md).
 O adaptador de replay agora cobre escrita direta de VRAM com sincronização e
 fallback para upload nativo com word parcial. Há exportação e comparação visual
 por checkpoint, além de testes CPU/Vulkan. A captura maior continua divergindo
-na imagem: nenhuma aprovação visual nem integração ao jogo foi declarada.
-Leitura FIFO com consumo parcial e uploads IMAGE parciais foram concluídos no replay;
-a integração ao jogo (etapa 3) é o próximo passo.
-Evidências: [diário da continuação](progression/2026-11-08-parallelgs-coerencia-e-checkpoints.md).
+na imagem: nenhuma aprovação visual foi declarada.
+Leitura FIFO com consumo parcial e uploads IMAGE parciais foram concluídos no replay.
+A etapa 3 começou: o shadow foi religado e executado no jogo sem crash, com o
+sink serializado e estatísticas no stderr. Apresentação GPU e promoção a
+backend autoritativo continuam pendentes.
+Evidências: [diário da continuação](progression/2026-11-08-parallelgs-coerencia-e-checkpoints.md)
+e [shadow executado](progression/2026-11-08-parallelgs-shadow-executado.md).
 
 ## Sequência de implementação
 
@@ -156,8 +159,17 @@ speedup do jogo.
 - [x] **Concluído:** adicionar seleção explícita CPU/GPU (`DRA2_GS_BACKEND=cpu`
   padrão ou `gpu-shadow`, build `DRA2_ENABLE_PARALLEL_GS=ON`); CPU é referência
   e fallback.
-- [ ] Conectar reset, uploads, transferências local/local e local/host, CLUT,
-  `TEXFLUSH`, ordenação GIF, interrupções e sincronizações GS usadas pelo jogo.
+- [x] **Concluído (shadow executado):** religar com `DRA2_ENABLE_PARALLEL_GS=ON`
+  e rodar `gpu-shadow` por 60/120 s sem crash, com progressão de apresentação
+  equivalente ao CPU nos logs. O sink foi serializado com mutex próprio
+  (`onLatch` roda sem `m_stateMutex`) e a cauda FIFO passou ao oráculo CPU.
+- [ ] **Em progresso:** conectar reset, uploads, transferências local/local e
+  local/host, CLUT, `TEXFLUSH`, ordenação GIF, interrupções e sincronizações
+  GS usadas pelo jogo. No shadow, GIF/registradores/uploads/clear/escrita
+  direta/reset/latch já chegam ao candidato; CLUT, `TEXFLUSH` e local/local
+  são resolvidos dentro dele. Na captura longa só há host→local (203×) e
+  `FINISH` (~1/latch); local→host/local→local e `SIGNAL`/`TEXFLUSH` não
+  foram exercitados ao vivo.
 - [ ] Definir quem possui cada região da VRAM, como alterações ficam visíveis
   e quando uma leitura do EE exige aguardar a GPU. Validar alias entre textura
   e framebuffer e leituras após escrita.
@@ -214,9 +226,10 @@ Não trocar de backend e alterar timing do EE/VU no mesmo experimento.
 O rasterizador CPU atual continua como referência; otimizações locais nele
 ficam subordinadas às medições, sem consumir a prioridade da migração estrutural.
 
-O próximo trabalho é **fechar o aceite das etapas 1 e 2**: aprovar as diferenças
-visuais, completar os cenários e as métricas de apresentação. Depois, a **etapa 3**
-conectará o candidato ao jogo. As etapas 3, 4 e 5 ainda não foram implementadas.
+O próximo trabalho é **fechar o aceite das etapas 1 e 2** (aprovar as diferenças
+visuais, completar cenários e métricas de apresentação) e avançar a **etapa 3**
+da apresentação shadow para a apresentação GPU na janela. As etapas 4 e 5
+ainda não foram implementadas.
 
 ## Referências para a avaliação
 
@@ -238,6 +251,8 @@ conectará o candidato ao jogo. As etapas 3, 4 e 5 ainda não foram implementada
 - `tools/test_gs_capture.py`: 11 testes de integração/validação em CPU e Vulkan.
 - `tools/compare_gs_checkpoints.py`: métricas RGB e imagens de diferença por checkpoint.
 - `tools/vu_replay.cpp` e alvo `dra2-vu-replay`: verificação e medição isolada VU.
+- `runtime/parallel_gs/`: adaptador shadow no jogo (etapa 3), com mutex
+  próprio, cauda FIFO via oráculo CPU e estatísticas a cada 300 latches.
 - `docs/gs-acelerado.md`: comandos, fronteiras, custos e limites do protótipo.
 - `progression/2026-11-07-gs-vulkan-replay-e-teto.md`: resultados, decisões,
   tentativas descartadas e pendências desta rodada.

@@ -177,3 +177,28 @@ de escrita CT24 com preservação do alfa e checagem integral da VRAM.
 
 Resultados e evidências desta continuação:
 [diário de 08/11](../progression/2026-11-08-parallelgs-coerencia-e-checkpoints.md).
+
+## Etapa 3: shadow no jogo
+
+Build opcional (padrão desligado) e execução:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O2 -DNDEBUG" -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O2 -DNDEBUG" \
+  -DCMAKE_EXE_LINKER_FLAGS=-fuse-ld=mold -DDRA2_ENABLE_PARALLEL_GS=ON
+cmake --build build --target dra2 -j5
+cd game && DRA2_GS_BACKEND=gpu-shadow DRA2_ISO=/caminho/para/a.iso \
+  timeout -s INT 60 ../build/dra2 "$PWD/SLUS_210.67"
+```
+
+O sink (`runtime/parallel_gs/`) espelha GIF pós-arbitragem, registradores
+diretos, uploads nativos, consumo local→host, clear, escrita direta, reset
+e latch no candidato. CLUT, `TEXFLUSH` e transferências local→local são
+resolvidos dentro do candidato a partir desse fluxo. O CPU continua
+autoritativo: VRAM, SIGNAL/FINISH, readback ao EE e apresentação (raylib)
+não mudam. Os callbacks são serializados por mutex próprio, porque
+`onLatch` é chamado sem o mutex de estado do frontend. A cada 300 latches
+o stderr recebe `[dra2-gs] shadow latches=... gif=... nativeFallbacks=...
+fifoReq=... fifoBytes=...`. Sem Vulkan, o sink se desliga com aviso e o
+jogo segue no CPU. Apresentação GPU na janela e promoção a backend
+autoritativo não fazem parte deste modo.
