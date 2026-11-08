@@ -1,0 +1,136 @@
+From ab5fb4ae2a05025be7f134b021cf1bb1afba59e7 Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sat, 7 Nov 2026 18:22:18 -0300
+Subject: [PATCH] ps2xRecomp: alinhar enderecos de LQ e SQ como no R5900
+
+Descartar os quatro bits inferiores antes de escolher o acesso fast/slow,
+inclusive quando o endereco foi resolvido por MemoryAccessHint. Manter
+LQC2/SQC2 com suas regras de alinhamento existentes.
+
+DRA2 usa SQ zero no ultimo word de um qword para limpar padding de um
+fluxo VIF. Sem alinhar, o scratchpad rejeita a escrita e deixa bytes ff,
+interpretados como UNPACK que corrompe os enderecos A_D do template VU1.
+A tela fica preta depois do aviso de autosave porque TEX0 nao e restaurado.
+
+Validacao: 63 testes CodeGenerator, incluindo RAM, scratchpad, MMIO e COP2.
+---
+ ps2xRecomp/src/lib/instruction_translator.cpp | 18 +++++---
+ ps2xTest/src/code_generator_tests.cpp         | 42 +++++++++++++++++++
+ 2 files changed, 54 insertions(+), 6 deletions(-)
+
+diff --git a/ps2xRecomp/src/lib/instruction_translator.cpp b/ps2xRecomp/src/lib/instruction_translator.cpp
+index 7684097..fba45d9 100644
+--- a/ps2xRecomp/src/lib/instruction_translator.cpp
++++ b/ps2xRecomp/src/lib/instruction_translator.cpp
+@@ -78,9 +78,11 @@ namespace ps2recomp
+                                                            int width,
+                                                            const std::string &addr) const
+     {
++        // LQ discards the low address bits; COP2 quadword transfers do not.
++        const bool alignQuadword = inst.opcode == OPCODE_LQ;
+         if (memoryHint.hasAddress)
+         {
+-            const uint32_t resolvedAddress = memoryHint.address;
++            const uint32_t resolvedAddress = alignQuadword ? (memoryHint.address & ~15u) : memoryHint.address;
+             const std::string resolvedAddressExpr = addressLiteral(resolvedAddress);
+             if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress))
+             {
+@@ -89,11 +91,12 @@ namespace ps2recomp
+             return fmt::format("FAST_READ{}({})", width, resolvedAddressExpr);
+         }
+ 
++        const std::string effectiveAddress = alignQuadword ? fmt::format("({} & ~15u)", addr) : addr;
+         if (inst.isMmio)
+         {
+-            return fmt::format("runtime->Load{}(rdram, ctx, {})", width, addr);
++            return fmt::format("runtime->Load{}(rdram, ctx, {})", width, effectiveAddress);
+         }
+-        return fmt::format("READ{}({})", width, addr);
++        return fmt::format("READ{}({})", width, effectiveAddress);
+     }
+ 
+     std::string InstructionTranslator::translateMemoryWrite(const Instruction &inst,
+@@ -102,9 +105,11 @@ namespace ps2recomp
+                                                             const std::string &addr,
+                                                             const std::string &value) const
+     {
++        // SQ has the same align-down rule as LQ, before either access path.
++        const bool alignQuadword = inst.opcode == OPCODE_SQ;
+         if (memoryHint.hasAddress)
+         {
+-            const uint32_t resolvedAddress = memoryHint.address;
++            const uint32_t resolvedAddress = alignQuadword ? (memoryHint.address & ~15u) : memoryHint.address;
+             const std::string resolvedAddressExpr = addressLiteral(resolvedAddress);
+             if (inst.isMmio || Ps2IsSpecialAddress(resolvedAddress))
+             {
+@@ -113,11 +118,12 @@ namespace ps2recomp
+             return genFastWrite(width, resolvedAddress, value);
+         }
+ 
++        const std::string effectiveAddress = alignQuadword ? fmt::format("({} & ~15u)", addr) : addr;
+         if (inst.isMmio)
+         {
+-            return fmt::format("runtime->Store{}(rdram, ctx, {}, {})", width, addr, value);
++            return fmt::format("runtime->Store{}(rdram, ctx, {}, {})", width, effectiveAddress, value);
+         }
+-        return fmt::format("WRITE{}({}, {})", width, addr, value);
++        return fmt::format("WRITE{}({}, {})", width, effectiveAddress, value);
+     }
+ 
+     std::string InstructionTranslator::translate(const Instruction &inst, const MemoryAccessHint &memoryHint)
+diff --git a/ps2xTest/src/code_generator_tests.cpp b/ps2xTest/src/code_generator_tests.cpp
+index 463b6cf..35e7a08 100644
+--- a/ps2xTest/src/code_generator_tests.cpp
++++ b/ps2xTest/src/code_generator_tests.cpp
+@@ -205,6 +205,48 @@ void register_code_generator_tests()
+                  "LWU must not sign-extend bit 31 into the allocator bitmap value");
+     });
+ 
++    tc.Run("LQ and SQ align effective addresses before selecting memory access", [](TestCase &t) {
++        CodeGenerator gen({}, {});
++        for (uint32_t opcode : {OPCODE_LQ, OPCODE_SQ})
++        {
++            Instruction inst = makeIType(0x8F20, opcode, 1, 2, 0x000C);
++            const bool load = opcode == OPCODE_LQ;
++            const std::string access = load ? "READ128" : "WRITE128";
++            const std::string dynamic = gen.translateInstruction(inst);
++            t.IsTrue(dynamic.find(access + "((ADD32(GPR_U32(ctx, 1), 12) & ~15u)") != std::string::npos,
++                     "dynamic LQ/SQ addresses must discard the low four bits");
++
++            for (uint32_t address : {0x200Cu, 0x7000002Cu})
++            {
++                const std::string resolved = gen.translateInstruction(inst, {true, address});
++                const std::string expected = address == 0x200Cu ? "0x2000u" : "0x70000020u";
++                t.IsTrue(resolved.find(expected) != std::string::npos,
++                         "constant LQ/SQ hints must align RAM and scratchpad addresses");
++                t.IsTrue(resolved.find(address == 0x200Cu ? "0x200Cu" : "0x7000002Cu") == std::string::npos,
++                         "an address hint must not bypass LQ/SQ alignment");
++            }
++
++            inst.isMmio = true;
++            const std::string mmio = gen.translateInstruction(inst);
++            t.IsTrue(mmio.find("(ADD32(GPR_U32(ctx, 1), 12) & ~15u)") != std::string::npos,
++                     "direct runtime LQ/SQ accesses must use the aligned effective address");
++        }
++    });
++
++    tc.Run("COP2 quadword transfers retain their original effective addresses", [](TestCase &t) {
++        CodeGenerator gen({}, {});
++        for (uint32_t opcode : {OPCODE_LQC2, OPCODE_SQC2})
++        {
++            const Instruction inst = makeIType(0x8F24, opcode, 1, 2, 0x000C);
++            const std::string dynamic = gen.translateInstruction(inst);
++            t.IsTrue(dynamic.find("~15u") == std::string::npos,
++                     "LQ/SQ alignment must not silently align COP2 transfers");
++            const std::string resolved = gen.translateInstruction(inst, {true, 0x200Cu});
++            t.IsTrue(resolved.find("0x200Cu") != std::string::npos,
++                     "COP2 address hints must preserve the original effective address");
++        }
++    });
++
+     tc.Run("SYSCALL publishes its continuation before entering the runtime", [](TestCase &t) {
+         Function func;
+         func.name = "syscall_resume";
+-- 
+2.56.0
+
