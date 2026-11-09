@@ -1,0 +1,42 @@
+From 576abeec5008ad779e54827754fbe78f0d037ddd Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sun, 8 Nov 2026 16:50:09 -0300
+Subject: [PATCH] =?UTF-8?q?Corrige=20posi=C3=A7=C3=A3o=20de=20amostragem?=
+ =?UTF-8?q?=20STQ=20dos=20sprites?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index b2d2151..e35f77a 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -1247,14 +1247,19 @@ void GSCpuBackend::DrawSprite(const GSPrimitiveBatch &batch)
+         if (spriteH < 1.0f)
+             spriteH = 1.0f;
+ 
++        // GS samples attributes at integer pixel positions. Adding a half
++        // pixel here shifts STQ nearest sampling into the next texel when
++        // the game already supplied half-texel coordinates. Keep the legacy
++        // UV path's bias paired with its integer endpoint quantization.
++        const float sampleOffset = state.prim.fst ? 0.5f : 0.0f;
+         for (int y = drawY0; y <= drawY1; ++y)
+         {
+-            float ty = (static_cast<float>(y - unclippedY0) + 0.5f) / spriteH;
++            float ty = (static_cast<float>(y - unclippedY0) + sampleOffset) / spriteH;
+             float texVf = v0f + (v1f - v0f) * ty;
+ 
+             for (int x = drawX0; x <= drawX1; ++x)
+             {
+-                float tx = (static_cast<float>(x - unclippedX0) + 0.5f) / spriteW;
++                float tx = (static_cast<float>(x - unclippedX0) + sampleOffset) / spriteW;
+                 float texUf = u0f + (u1f - u0f) * tx;
+                 uint32_t texel = 0xFFFF00FFu;
+                 if (state.prim.fst)
+-- 
+2.56.0
+
