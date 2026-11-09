@@ -70,9 +70,12 @@ int main() try
     const auto start=std::chrono::steady_clock::now();
     for (int i=0; i<80; ++i) backend.Submit(batch);
     const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+    if (backend.ReadVram(GS_PSM_CT32, 200 * 32, 10, 0, 0) == 0u ||
+        backend.ReadVram(GS_PSM_CT32, 200 * 32, 10, 320, 224) != 0u)
+        throw std::runtime_error("cobertura top-left do triangulo divergiu");
     uint64_t hash=14695981039346656037ull;
     for (uint8_t b:vram) hash=(hash^b)*1099511628211ull;
-    if (hash != 0x1da861ea475b3918ull)
+    if (hash != 0x5126770f04f8ef17ull)
         throw std::runtime_error("VRAM divergiu da rasterizacao de referencia");
     std::cout << "comparisons=" << checked << " raster_seconds=" << seconds
               << " vram_fnv1a=" << std::hex << hash << '\n';

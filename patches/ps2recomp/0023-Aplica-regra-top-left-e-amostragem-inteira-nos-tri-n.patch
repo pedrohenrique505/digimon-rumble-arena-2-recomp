@@ -1,0 +1,280 @@
+From d30759c71307a45ff0df8d6b75ab5fb6931fbedb Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Sun, 8 Nov 2026 22:13:20 -0300
+Subject: [PATCH] =?UTF-8?q?Aplica=20regra=20top-left=20e=20amostragem=20in?=
+ =?UTF-8?q?teira=20nos=20tri=C3=A2ngulos=20do=20GS=20CPU?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Mantém XYOFFSET e vértices em ponto fixo 12.4, avalia cobertura exata em inteiros com desempate top-left e amostra atributos nas coordenadas inteiras do pixel, preservando profundidade e cor constantes.
+---
+ ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp | 100 ++++++++++++++++------
+ ps2xTest/src/ps2_gs_tests.cpp             |  89 +++++++++++++++++--
+ 2 files changed, 156 insertions(+), 33 deletions(-)
+
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index e35f77a..882f302 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -1310,48 +1310,94 @@ void GSCpuBackend::DrawTriangle(const GSPrimitiveBatch &batch)
+                                v0.b == v1.b && v1.b == v2.b &&
+                                v0.a == v1.a && v1.a == v2.a;
+ 
+-    int ofx = ctx.xyoffset.ofx >> 4;
+-    int ofy = ctx.xyoffset.ofy >> 4;
++    // Window coordinates in 12.4 fixed point, keeping XYOFFSET's fraction.
++    const int64_t ix0 = static_cast<int64_t>(std::llround(static_cast<double>(v0.x) * 16.0)) - ctx.xyoffset.ofx;
++    const int64_t iy0 = static_cast<int64_t>(std::llround(static_cast<double>(v0.y) * 16.0)) - ctx.xyoffset.ofy;
++    const int64_t ix1 = static_cast<int64_t>(std::llround(static_cast<double>(v1.x) * 16.0)) - ctx.xyoffset.ofx;
++    const int64_t iy1 = static_cast<int64_t>(std::llround(static_cast<double>(v1.y) * 16.0)) - ctx.xyoffset.ofy;
++    const int64_t ix2 = static_cast<int64_t>(std::llround(static_cast<double>(v2.x) * 16.0)) - ctx.xyoffset.ofx;
++    const int64_t iy2 = static_cast<int64_t>(std::llround(static_cast<double>(v2.y) * 16.0)) - ctx.xyoffset.ofy;
+ 
+-    float fx0 = v0.x - static_cast<float>(ofx);
+-    float fy0 = v0.y - static_cast<float>(ofy);
+-    float fx1 = v1.x - static_cast<float>(ofx);
+-    float fy1 = v1.y - static_cast<float>(ofy);
+-    float fx2 = v2.x - static_cast<float>(ofx);
+-    float fy2 = v2.y - static_cast<float>(ofy);
+-
+-    int minX = static_cast<int>(std::floor(std::min({fx0, fx1, fx2})));
+-    int maxX = static_cast<int>(std::ceil(std::max({fx0, fx1, fx2})));
+-    int minY = static_cast<int>(std::floor(std::min({fy0, fy1, fy2})));
+-    int maxY = static_cast<int>(std::ceil(std::max({fy0, fy1, fy2})));
+-
+-    minX = clampInt(minX, ctx.scissor.x0, ctx.scissor.x1);
+-    maxX = clampInt(maxX, ctx.scissor.x0, ctx.scissor.x1);
+-    minY = clampInt(minY, ctx.scissor.y0, ctx.scissor.y1);
+-    maxY = clampInt(maxY, ctx.scissor.y0, ctx.scissor.y1);
+-
+-    float denom = (fy1 - fy2) * (fx0 - fx2) + (fx2 - fx1) * (fy0 - fy2);
+-    if (std::fabs(denom) < 0.001f)
++    // Edge functions in exact 12.4 integers, oriented so the interior is positive.
++    // Like the GS hardware, PCSX2 SW, and paraLLEl-GS, pixels are sampled at
++    // integer coordinates and the top-left rule resolves samples on shared edges.
++    const int64_t area = (ix1 - ix0) * (iy2 - iy0) - (iy1 - iy0) * (ix2 - ix0);
++    if (area == 0)
+         return;
+ 
++    struct Edge
++    {
++        int64_t a, b, c;
++        bool topLeft;
++    };
++    auto makeEdge = [](int64_t ax, int64_t ay, int64_t bx, int64_t by) -> Edge
++    {
++        const int64_t dx = bx - ax;
++        const int64_t dy = by - ay;
++        return Edge{-dy, dx, dy * ax - dx * ay, dy < 0 || (dy == 0 && dx > 0)};
++    };
++    Edge edges[3];
++    if (area > 0)
++    {
++        edges[0] = makeEdge(ix0, iy0, ix1, iy1);
++        edges[1] = makeEdge(ix1, iy1, ix2, iy2);
++        edges[2] = makeEdge(ix2, iy2, ix0, iy0);
++    }
++    else
++    {
++        edges[0] = makeEdge(ix0, iy0, ix2, iy2);
++        edges[1] = makeEdge(ix2, iy2, ix1, iy1);
++        edges[2] = makeEdge(ix1, iy1, ix0, iy0);
++    }
++
++    auto covers = [&](int x, int y) -> bool
++    {
++        const int64_t sx = static_cast<int64_t>(x) * 16;
++        const int64_t sy = static_cast<int64_t>(y) * 16;
++        for (const Edge &e : edges)
++        {
++            const int64_t value = e.a * sx + e.b * sy + e.c;
++            if (value < 0 || (value == 0 && !e.topLeft))
++                return false;
++        }
++        return true;
++    };
++
++    const int64_t minIx = std::min({ix0, ix1, ix2});
++    const int64_t maxIx = std::max({ix0, ix1, ix2});
++    const int64_t minIy = std::min({iy0, iy1, iy2});
++    const int64_t maxIy = std::max({iy0, iy1, iy2});
++
++    const int minX = std::max(static_cast<int>((minIx + 15) >> 4), static_cast<int>(ctx.scissor.x0));
++    const int maxX = std::min(static_cast<int>((maxIx - 1) >> 4), static_cast<int>(ctx.scissor.x1));
++    const int minY = std::max(static_cast<int>((minIy + 15) >> 4), static_cast<int>(ctx.scissor.y0));
++    const int maxY = std::min(static_cast<int>((maxIy - 1) >> 4), static_cast<int>(ctx.scissor.y1));
++
++    const float fx0 = static_cast<float>(ix0) / 16.0f;
++    const float fy0 = static_cast<float>(iy0) / 16.0f;
++    const float fx1 = static_cast<float>(ix1) / 16.0f;
++    const float fy1 = static_cast<float>(iy1) / 16.0f;
++    const float fx2 = static_cast<float>(ix2) / 16.0f;
++    const float fy2 = static_cast<float>(iy2) / 16.0f;
++
++    const float denom = (fy1 - fy2) * (fx0 - fx2) + (fx2 - fx1) * (fy0 - fy2);
+     const float winding = (denom < 0.0f) ? -1.0f : 1.0f;
+     const float invAbsDenom = 1.0f / std::fabs(denom);
+-    constexpr float kEdgeEpsilon = 1.0e-4f;
+ 
+     for (int y = minY; y <= maxY; ++y)
+     {
+-        float py = static_cast<float>(y) + 0.5f;
++        const float py = static_cast<float>(y);
+         for (int x = minX; x <= maxX; ++x)
+         {
+-            float px = static_cast<float>(x) + 0.5f;
++            if (!covers(x, y))
++                continue;
++
++            const float px = static_cast<float>(x);
+ 
+             float w0 = (((fy1 - fy2) * (px - fx2) + (fx2 - fx1) * (py - fy2)) * winding) * invAbsDenom;
+             float w1 = (((fy2 - fy0) * (px - fx2) + (fx0 - fx2) * (py - fy2)) * winding) * invAbsDenom;
+             float w2 = 1.0f - w0 - w1;
+ 
+-            if (w0 < -kEdgeEpsilon || w1 < -kEdgeEpsilon || w2 < -kEdgeEpsilon)
+-                continue;
+-
+             double z = constantDepth ? v0.z : v0.z * w0 + v1.z * w1 + v2.z * w2;
+ 
+             uint8_t r, g, b, a;
+diff --git a/ps2xTest/src/ps2_gs_tests.cpp b/ps2xTest/src/ps2_gs_tests.cpp
+index 113cc88..2e16671 100644
+--- a/ps2xTest/src/ps2_gs_tests.cpp
++++ b/ps2xTest/src/ps2_gs_tests.cpp
+@@ -3527,11 +3527,13 @@ void register_ps2_gs_tests()
+                 gs.writeRegister(GS_REG_ST, packSt(0.0f, 0.0f));
+                 gs.writeRegister(GS_REG_XYZ2, 0ull);
+                 gs.writeRegister(GS_REG_ST, packSt(1.0f, 0.0f));
+-                gs.writeRegister(GS_REG_XYZ2, (64ull << 0) | (0ull << 16));
++                gs.writeRegister(GS_REG_XYZ2, (128ull << 0) | (0ull << 16));
+                 gs.writeRegister(GS_REG_ST, packSt(0.0f, 0.0f));
+                 gs.writeRegister(GS_REG_XYZ2, (0ull << 0) | (64ull << 16));
+ 
+-                return readReferencePSMCT32Pixel(vram, 0u, 1u, 1u, 1u);
++                // Pixels are sampled at integer coordinates: (3, 1) interpolates
++                // S = 3/8, i.e. u = 0.75 texels, between texels 0 and 1.
++                return readReferencePSMCT32Pixel(vram, 0u, 1u, 3u, 1u);
+             };
+ 
+             constexpr uint64_t kTex1Linear =
+@@ -3695,13 +3697,15 @@ void register_ps2_gs_tests()
+             gs.writeRegister(GS_REG_XYZ2, 0ull);
+             gs.writeRegister(GS_REG_ST, packSt(2.0f, 0.0f));
+             gs.writeRegister(GS_REG_RGBAQ, packRgbaq(2.0f));
+-            gs.writeRegister(GS_REG_XYZ2, 64ull);
++            gs.writeRegister(GS_REG_XYZ2, 128ull);
+             gs.writeRegister(GS_REG_ST, packSt(0.0f, 0.0f));
+             gs.writeRegister(GS_REG_RGBAQ, packRgbaq(1.0f));
+             gs.writeRegister(GS_REG_XYZ2, (64ull << 16));
+ 
++            // Sampled at integer pixel (3, 1): S = 0.75 and Q = 1.375, so
++            // S/Q selects texel 2, while affine S/Q interpolation gives texel 1.
+             const uint32_t pixel =
+-                readReferencePSMCT32Pixel(vram, 0u, 1u, 1u, 1u);
++                readReferencePSMCT32Pixel(vram, 0u, 1u, 3u, 1u);
+             t.Equals(pixel, kHomogeneousTexel,
+                      "the DDA should interpolate S=0.75 and Q=1.375, selecting texel 2 after S/Q");
+         });
+@@ -3909,7 +3913,7 @@ void register_ps2_gs_tests()
+                 int last = -1;
+                 for (uint32_t x = 6u; x <= 26u; ++x)
+                 {
+-                    const size_t offset = (static_cast<size_t>(y) * 64u + static_cast<size_t>(x)) * 4u;
++                    const uint32_t offset = GSPSMCT32::addrPSMCT32(0u, 1u, x, y);
+                     uint32_t pixel = 0u;
+                     std::memcpy(&pixel, vram.data() + offset, sizeof(pixel));
+                     if ((pixel & 0x00FFFFFFu) != 0u)
+@@ -3930,7 +3934,7 @@ void register_ps2_gs_tests()
+                 sawFilledRow = true;
+                 for (int x = first; x <= last; ++x)
+                 {
+-                    const size_t offset = (static_cast<size_t>(y) * 64u + static_cast<size_t>(x)) * 4u;
++                    const uint32_t offset = GSPSMCT32::addrPSMCT32(0u, 1u, static_cast<uint32_t>(x), y);
+                     uint32_t pixel = 0u;
+                     std::memcpy(&pixel, vram.data() + offset, sizeof(pixel));
+                     if ((pixel & 0x00FFFFFFu) == 0u)
+@@ -3945,6 +3949,79 @@ void register_ps2_gs_tests()
+                      "triangle fan quad should light at least one framebuffer row");
+         });
+ 
++        tc.Run("GS triangles sharing an edge draw each pixel once under additive blending", [](TestCase &t)
++        {
++            std::vector<uint8_t> vram(PS2_GS_VRAM_SIZE, 0u);
++            GS gs;
++            gs.init(vram.data(), static_cast<uint32_t>(vram.size()), nullptr);
++
++            constexpr uint64_t kFrame =
++                (1ull << 16) |
++                (static_cast<uint64_t>(GS_PSM_CT32) << 24);
++            constexpr uint64_t kZbuf = (1ull << 32);
++            constexpr uint64_t kScissor =
++                (0ull << 0) |
++                (15ull << 16) |
++                (0ull << 32) |
++                (15ull << 48);
++            constexpr uint64_t kAlphaAdd =
++                (0ull << 0) |
++                (2ull << 2) |
++                (2ull << 4) |
++                (1ull << 6) |
++                (0x80ull << 32);
++            constexpr uint64_t kPrim =
++                static_cast<uint64_t>(GS_PRIM_TRIANGLE) |
++                (1ull << 6);
++            constexpr uint64_t kRgbaq =
++                0x20ull |
++                (0x80ull << 24) |
++                (0x3F800000ull << 32);
++            auto makeXyz = [](uint16_t x, uint16_t y) -> uint64_t
++            {
++                return static_cast<uint64_t>(x) |
++                       (static_cast<uint64_t>(y) << 16);
++            };
++
++            gs.writeRegister(GS_REG_FRAME_1, kFrame);
++            gs.writeRegister(GS_REG_ZBUF_1, kZbuf);
++            gs.writeRegister(GS_REG_SCISSOR_1, kScissor);
++            gs.writeRegister(GS_REG_XYOFFSET_1, 0ull);
++            gs.writeRegister(GS_REG_TEST_1, 0x30000ull);
++            gs.writeRegister(GS_REG_ALPHA_1, kAlphaAdd);
++            gs.writeRegister(GS_REG_PRIM, kPrim);
++            gs.writeRegister(GS_REG_RGBAQ, kRgbaq);
++
++            gs.writeRegister(GS_REG_XYZ2, makeXyz(0u, 0u));
++            gs.writeRegister(GS_REG_XYZ2, makeXyz(128u, 0u));
++            gs.writeRegister(GS_REG_XYZ2, makeXyz(128u, 128u));
++            gs.writeRegister(GS_REG_XYZ2, makeXyz(0u, 0u));
++            gs.writeRegister(GS_REG_XYZ2, makeXyz(128u, 128u));
++            gs.writeRegister(GS_REG_XYZ2, makeXyz(0u, 128u));
++
++            int drawnOnce = 0;
++            int drawnTwice = 0;
++            int drawnOutside = 0;
++            for (uint32_t y = 0u; y <= 9u; ++y)
++            {
++                for (uint32_t x = 0u; x <= 9u; ++x)
++                {
++                    const uint32_t red = readReferencePSMCT32Pixel(vram, 0u, 1u, x, y) & 0xFFu;
++                    const bool inside = x < 8u && y < 8u;
++                    if (!inside && red != 0u)
++                        ++drawnOutside;
++                    else if (inside && red == 0x20u)
++                        ++drawnOnce;
++                    else if (inside && red == 0x40u)
++                        ++drawnTwice;
++                }
++            }
++
++            t.Equals(drawnTwice, 0, "no pixel on the shared diagonal should be blended twice");
++            t.Equals(drawnOnce, 64, "every pixel of the 8x8 quad should be drawn exactly once");
++            t.Equals(drawnOutside, 0, "the top-left rule should leave the right and bottom edges undrawn");
++        });
++
+         tc.Run("sceGsExecLoadImage and sceGsExecStoreImage roundtrip and free guest packets", [](TestCase &t)
+         {
+             PS2Runtime runtime;
+-- 
+2.56.0
+
