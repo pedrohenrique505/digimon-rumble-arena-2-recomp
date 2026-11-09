@@ -310,3 +310,13 @@ a primeira redução introduziu diferenças adicionais. Uma segunda preserva
 todo o estado anterior e reproduz 64 bytes do mesmo padrão com um único
 sprite. Próximo passo é localizar esses pixels/texels e confirmar a causa
 antes de criar caso sintético e patch. [Evidências e limites](progression/2026-11-08-parallelgs-segunda-divergencia-isolada.md).
+
+
+## Causa do sprite confirmada (08/11)
+
+O patch 0022 corrige um meio pixel indevido na interpolação STQ de sprites
+no GS CPU. A CPU lia a linha seguinte da textura; os texels explicam exatamente
+os bytes 240/95 observados. Teste GIF sintético reproduz a falha e REA/GDB
+confirma os argumentos antes/depois. O prefixo original até o registro 38 agora
+é idêntico nos 4 MiB CPU/GPU. Próximo passo: localizar a primeira diferença
+posterior a 38; referências antigas continuam preservadas. [Causa, testes e limites](progression/2026-11-08-parallelgs-causa-sprite-stq-confirmada.md).

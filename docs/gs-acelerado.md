@@ -287,3 +287,18 @@ Cabeçalho e payload de upload nativo são indivisíveis. Códigos de saída dos
 replayers sem referência são aceitos apenas quando a VRAM completa foi exportada.
 O resultado localiza uma diferença entre implementações; não decide qual delas
 corresponde ao hardware. Capturas e saídas devem permanecer fora do git.
+
+
+### Regressão da amostragem STQ de sprites (patch 0022)
+
+```bash
+python3 tools/test_gs_sprite_sampling.py .cache/gs-replay-build/dra2-gs-replay
+python3 tools/test_gs_sprite_sampling.py .cache/gs-replay-build/dra2-gs-replay-vulkan
+```
+
+São 24 casos GIF sintéticos por backend: STQ/UV/cor sólida, origem inteira/meio
+texel e quatro modos de arredondamento do host. O teste verifica texels esperados,
+sem dados do jogo. A correção retira um meio pixel adicional da interpolação STQ;
+não altera a aproximação UV existente nem comprova equivalência geral de sprites.
+O prefixo real até o registro 38 passou a coincidir nos 4 MiB. Referências CPU
+anteriores ao patch continuam históricas. [Evidências e limites](../progression/2026-11-08-parallelgs-causa-sprite-stq-confirmada.md).
