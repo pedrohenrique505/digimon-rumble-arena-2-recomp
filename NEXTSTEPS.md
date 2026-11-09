@@ -320,3 +320,17 @@ os bytes 240/95 observados. Teste GIF sintético reproduz a falha e REA/GDB
 confirma os argumentos antes/depois. O prefixo original até o registro 38 agora
 é idêntico nos 4 MiB CPU/GPU. Próximo passo: localizar a primeira diferença
 posterior a 38; referências antigas continuam preservadas. [Causa, testes e limites](progression/2026-11-08-parallelgs-causa-sprite-stq-confirmada.md).
+
+## Cobertura top-left e amostragem inteira de triângulos (08/11)
+
+`find_gs_first_difference.py --start-record` localizou a divergência seguinte no
+registro 388 (16 triângulos de UI/fonte compartilhando diagonais com bilinear e
+blending). O patch 0023 mantém vértices e `XYOFFSET` em ponto fixo 12.4, aplica
+regra top-left exata em inteiros e amostra atributos nas coordenadas inteiras do
+pixel. Os desvios de cobertura, dupla mistura em arestas compartilhadas e
+deslocamento de meio texel sumiram; no registro 388 restam apenas 447 bytes de
+arredondamento bilinear (erro máximo 3), e nos checkpoints 1–4 o erro máximo RGB
+caiu de 248 para 8 (1 LSB em CT16). Os checkpoints 5 e 6 ainda divergem
+estruturalmente (`max_err` 152 e 248). Próximo passo: isolar a divergência
+estrutural que entra entre os registros 3592 e 34057.
+[Cadeia causal, evidências e limites](progression/2026-11-08-parallelgs-triangulo-top-left.md).

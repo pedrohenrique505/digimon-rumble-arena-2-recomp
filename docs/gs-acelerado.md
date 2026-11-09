@@ -302,3 +302,22 @@ sem dados do jogo. A correção retira um meio pixel adicional da interpolação
 não altera a aproximação UV existente nem comprova equivalência geral de sprites.
 O prefixo real até o registro 38 passou a coincidir nos 4 MiB. Referências CPU
 anteriores ao patch continuam históricas. [Evidências e limites](../progression/2026-11-08-parallelgs-causa-sprite-stq-confirmada.md).
+
+### Cobertura top-left e amostragem inteira de triângulos (patch 0023)
+
+```bash
+python3 tools/find_gs_first_difference.py captura.gs .cache/pos-38 --start-record 388
+python3 tools/test_gs_triangle_raster.py .cache/gs-replay-build/dra2-gs-replay
+python3 tools/test_gs_triangle_raster.py .cache/gs-replay-build/dra2-gs-replay-vulkan
+bash tools/check_gs_bilinear.sh
+```
+
+`--start-record` retoma a busca sequencial somente após verificar que o prefixo
+imediatamente anterior coincide nos 4 MiB. `test_gs_triangle_raster.py` cobre 12
+casos GIF sintéticos por backend (diagonal compartilhada sob blending aditivo,
+`XYOFFSET` fracionário em ponto fixo 12.4 e vértices em meio pixel com filtro
+bilinear, em quatro modos de arredondamento). O patch 0023 alinha `DrawTriangle`
+à grade inteira e à regra top-left, reduzindo o registro 388 a arredondamento
+bilinear de 1–3 LSB e eliminando erros maiores que 1 LSB RGB555 nos checkpoints
+1–4; checkpoints 5 e 6 seguem com divergência estrutural aberta.
+[Cadeia causal e evidências](../progression/2026-11-08-parallelgs-triangulo-top-left.md).
