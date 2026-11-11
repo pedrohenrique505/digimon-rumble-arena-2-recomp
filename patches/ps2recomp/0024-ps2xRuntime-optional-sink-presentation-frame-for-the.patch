@@ -1,0 +1,76 @@
+From 3929fdd89e226356e385b4efea1d19640fbbef69 Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Tue, 10 Nov 2026 21:12:16 -0300
+Subject: [PATCH 24/24] ps2xRuntime: optional sink presentation frame for the
+ window
+
+GSGifSink gains copyPresentationFrame; latchHostPresentationFrame uses a
+sink-supplied frame for the window when present (skipped in capture mode),
+keeping the CPU backend authoritative otherwise.
+---
+ ps2xRuntime/include/runtime/gs/gs_frontend.h |  9 +++++++
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp       | 28 ++++++++++++++++++++
+ 2 files changed, 37 insertions(+)
+
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index 615cbee..6846919 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -111,6 +111,15 @@ struct GSGifSink
+                                uint32_t x, uint32_t y, uint32_t value) = 0;
+     virtual void onReset() = 0;
+     virtual void onLatch() = 0;
++    // Optional live presentation: after onLatch, a sink may supply the frame
++    // to show (tightly packed RGBA, width*height*4). Returning false keeps
++    // the CPU backend presentation. Used by GPU backends presenting in-window.
++    virtual bool copyPresentationFrame(std::vector<uint8_t> &outPixels,
++                                       uint32_t &outWidth, uint32_t &outHeight)
++    {
++        (void)outPixels; (void)outWidth; (void)outHeight;
++        return false;
++    }
+ };
+ 
+ class GS
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index fb7ed73..12f7618 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -543,6 +543,34 @@ void GS::latchHostPresentationFrame()
+ 
+     if (m_gifSink)
+         m_gifSink->onLatch();
++    // A sink that supplies a live presentation frame (e.g. GPU scanout)
++    // replaces the CPU composition for the window only; the CPU backend
++    // stays authoritative for VRAM, readback and signals. Capture mode
++    // keeps the CPU path so references still describe the CPU VRAM.
++    if (m_gifSink && !gscapture::enabled())
++    {
++        std::vector<uint8_t> gpuPixels;
++        uint32_t gpuWidth = 0, gpuHeight = 0;
++        if (m_gifSink->copyPresentationFrame(gpuPixels, gpuWidth, gpuHeight) &&
++            gpuWidth != 0 && gpuHeight != 0 && gpuWidth <= kHostFrameWidth &&
++            gpuPixels.size() >= static_cast<size_t>(gpuWidth) * gpuHeight * 4u)
++        {
++            std::vector<uint8_t> framed(static_cast<size_t>(kHostFrameWidth) * gpuHeight * 4u, 0u);
++            for (uint32_t y = 0; y < gpuHeight; ++y)
++                std::memcpy(framed.data() + static_cast<size_t>(y) * kHostFrameWidth * 4u,
++                            gpuPixels.data() + static_cast<size_t>(y) * gpuWidth * 4u,
++                            static_cast<size_t>(gpuWidth) * 4u);
++            std::lock_guard<std::mutex> presentationLock(m_presentationMutex);
++            m_hostPresentationFrame = std::move(framed);
++            m_hostPresentationWidth = gpuWidth;
++            m_hostPresentationHeight = gpuHeight;
++            m_hostPresentationDisplayFbp = 0;
++            m_hostPresentationSourceFbp = 0;
++            m_hostPresentationUsedPreferred = false;
++            m_hasHostPresentationFrame = true;
++            return;
++        }
++    }
+     ps2perf::Scope perfScope(ps2perf::GS);
+     GSPresentationRequest request{};
+     {
+-- 
+2.56.0
+
