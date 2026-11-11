@@ -465,6 +465,8 @@ public:
             std::fprintf(stderr, "[dra2-gs] primeiro quadro GPU apresentado %ux%u\n", w, h);
     }
 
+    bool skipCpuRaster() const override { return m_present; }
+
     bool copyPresentationFrame(std::vector<uint8_t> &outPixels, uint32_t &outWidth,
                                uint32_t &outHeight) override
     {

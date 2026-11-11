@@ -1,0 +1,115 @@
+From 450a8405731df491f6b3ecb8a538470ec1154dc0 Mon Sep 17 00:00:00 2001
+From: Pedro Henrique <pedro88rising@gmail.com>
+Date: Tue, 10 Nov 2026 22:20:47 -0300
+Subject: [PATCH] ps2xRuntime: let a presenting sink skip CPU rasterization
+
+GSGifSink::skipCpuRaster wires to GSRasterBackend::setRasterEnabled;
+the CPU backend keeps consuming commands, uploads and transfers but
+skips DrawPrimitive and framebuffer clears per pixel.
+---
+ ps2xRuntime/include/runtime/gs/gs_backend.h     |  3 +++
+ ps2xRuntime/include/runtime/gs/gs_cpu_backend.h |  2 ++
+ ps2xRuntime/include/runtime/gs/gs_frontend.h    | 10 +++++++++-
+ ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp       |  4 ++--
+ ps2xRuntime/src/lib/gs/gs_frontend.cpp          |  1 +
+ 5 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/ps2xRuntime/include/runtime/gs/gs_backend.h b/ps2xRuntime/include/runtime/gs/gs_backend.h
+index 3f00d01..2ae20b2 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_backend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_backend.h
+@@ -14,6 +14,9 @@ public:
+     virtual void Reset() = 0;
+ 
+     virtual void Submit(const GSPrimitiveBatch &batch) = 0;
++    // When false, Submit/ClearFramebuffer keep consuming commands but skip
++    // per-pixel work (another backend is presenting the drawn image).
++    virtual void setRasterEnabled(bool enabled) { (void)enabled; }
+     virtual void LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut) = 0;
+ 
+     virtual void BeginTransfer(const GSTransferCommand &command) = 0;
+diff --git a/ps2xRuntime/include/runtime/gs/gs_cpu_backend.h b/ps2xRuntime/include/runtime/gs/gs_cpu_backend.h
+index 2421f9e..f2168c2 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_cpu_backend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_cpu_backend.h
+@@ -26,6 +26,7 @@ public:
+     PresentationFrame Present(const GSPresentationRequest &request) override;
+ 
+     bool ClearFramebuffer(const GSContext &context, uint32_t rgba) override;
++    void setRasterEnabled(bool enabled) override { m_rasterEnabled = enabled; }
+     uint32_t ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes) override;
+ 
+     uint32_t ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const override;
+@@ -66,6 +67,7 @@ private:
+ 
+     static constexpr size_t kPsmHandlerCount = 1u << 6u;
+     mutable std::mutex m_mutex;
++    bool m_rasterEnabled = true;
+     uint8_t *m_vram = nullptr;
+     uint32_t m_vramSize = 0;
+     std::array<ReadVramFunc, kPsmHandlerCount> m_readVramFuncs{};
+diff --git a/ps2xRuntime/include/runtime/gs/gs_frontend.h b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+index 6846919..2cd3a06 100644
+--- a/ps2xRuntime/include/runtime/gs/gs_frontend.h
++++ b/ps2xRuntime/include/runtime/gs/gs_frontend.h
+@@ -120,6 +120,9 @@ struct GSGifSink
+         (void)outPixels; (void)outWidth; (void)outHeight;
+         return false;
+     }
++    // True when this sink presents the drawn image itself: the CPU backend
++    // then skips per-pixel rasterization (uploads/transfers still run).
++    virtual bool skipCpuRaster() const { return false; }
+ };
+ 
+ class GS
+@@ -131,7 +134,12 @@ public:
+     void init(uint8_t *vram, uint32_t vramSize, struct GSRegisters *privRegs = nullptr);
+     void reset();
+     void setRasterBackend(std::unique_ptr<GSRasterBackend> backend);
+-    void setGifSink(GSGifSink *sink) { m_gifSink = sink; }
++    void setGifSink(GSGifSink *sink)
++    {
++        m_gifSink = sink;
++        if (m_backend)
++            m_backend->setRasterEnabled(!sink || !sink->skipCpuRaster());
++    }
+     GSGifSink *gifSink() const { return m_gifSink; }
+ 
+     void processGIFPacket(const uint8_t *data, uint32_t sizeBytes);
+diff --git a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+index 882f302..dcc76fa 100644
+--- a/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_cpu_backend.cpp
+@@ -555,7 +555,7 @@ void GSCpuBackend::Submit(const GSPrimitiveBatch &batch)
+     std::lock_guard<std::mutex> lock(m_mutex);
+     if (!m_vram || batch.vertexCount == 0u)
+         return;
+-    if (!ps2perf::noRaster()) DrawPrimitive(batch);
++    if (m_rasterEnabled && !ps2perf::noRaster()) DrawPrimitive(batch);
+ }
+ 
+ void GSCpuBackend::LoadClut(const GSTex0Reg &tex0, const GSTexClutReg &texclut)
+@@ -1781,7 +1781,7 @@ uint32_t GSCpuBackend::ConsumeLocalToHostBytes(uint8_t *dst, uint32_t maxBytes)
+ 
+ bool GSCpuBackend::ClearFramebuffer(const GSContext &context, uint32_t rgba)
+ {
+-    if(ps2perf::noRaster()) return true;
++    if(!m_rasterEnabled || ps2perf::noRaster()) return true;
+     std::lock_guard<std::mutex> lock(m_mutex);
+     if (!m_vram || context.frame.fbw == 0u)
+         return false;
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+index 12f7618..dddab73 100644
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1755,6 +1755,7 @@ void GS::setRasterBackend(std::unique_ptr<GSRasterBackend> backend)
+ 
+     m_backend = std::move(backend);
+     m_backend->Initialize(m_localMemoryStorage, m_localMemorySize);
++    m_backend->setRasterEnabled(!m_gifSink || !m_gifSink->skipCpuRaster());
+ }
+ 
+ uint32_t GS::ReadVram(uint32_t psm, uint32_t base, uint32_t bw, uint32_t x, uint32_t y) const
+-- 
+2.56.0
+
