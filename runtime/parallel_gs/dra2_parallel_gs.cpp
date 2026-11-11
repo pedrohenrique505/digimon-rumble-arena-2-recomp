@@ -37,7 +37,7 @@ unsigned bitsPerPixel(unsigned psm)
 class ShadowSink final : public GSGifSink
 {
 public:
-    explicit ShadowSink(PS2Runtime &runtime) : m_runtime(runtime) {}
+    ShadowSink(PS2Runtime &runtime, bool present) : m_runtime(runtime), m_present(present) {}
 
     bool ensureInit()
     {
@@ -97,7 +97,7 @@ public:
 
     void onGifPacket(const uint8_t *data, uint32_t sizeBytes) override
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         // Mesma inspeção de tags do replay: IMAGE parcial vai pelo fallback.
@@ -155,7 +155,7 @@ public:
 
     void onRegister(uint8_t regAddr, uint64_t value) override
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         if (regAddr >= 0x50 && regAddr <= 0x53)
@@ -175,7 +175,7 @@ public:
     void onNativeUpload(uint64_t bitbltbuf, uint64_t trxpos, uint64_t trxreg,
                         uint64_t trxdir, const uint8_t *data, uint32_t sizeBytes) override
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         const uint64_t regs[4] = {bitbltbuf, trxpos, trxreg, trxdir};
@@ -201,7 +201,7 @@ public:
 
     void onLocalToHostRequest(uint32_t maxBytes) override
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         // Consome do FIFO GPU apenas para manter o estado do candidato em
@@ -283,7 +283,7 @@ public:
 
     void onClear(uint32_t contextIndex, uint32_t rgba) override
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         auto &state = m_gpu.get_register_state().ctx[contextIndex != 0];
@@ -309,7 +309,7 @@ public:
     void onDirectWrite(uint32_t psm, uint32_t base, uint32_t bw,
                        uint32_t x, uint32_t y, uint32_t value) override
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         m_gpu.flush();
@@ -322,14 +322,14 @@ public:
 
     void onReset() override
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (m_ready)
             resetGpu();
     }
 
     void onLatch() override
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
         if (!ensureInit())
             return;
         const GSRegisters &priv = m_runtime.memory().gs();
@@ -357,6 +357,8 @@ public:
                 std::fprintf(stderr, "[dra2-gs] primeiro scanout %ux%u smode1=0x%llx\n",
                              scanout.image->get_width(), scanout.image->get_height(),
                              (unsigned long long)priv.smode1);
+            if (m_present)
+                readbackScanout(scanout);
         }
         else
             m_stats.emptyScanouts++;
@@ -365,22 +367,94 @@ public:
         m_stats.latches++;
         if (m_stats.latches % 300 == 0)
             std::fprintf(stderr,
-                         "[dra2-gs] shadow latches=%llu gif=%llu nativeFallbacks=%llu fifoReq=%llu fifoBytes=%llu scanoutImages=%llu emptyScanouts=%llu\n",
+                         "[dra2-gs] shadow latches=%llu gif=%llu nativeFallbacks=%llu fifoReq=%llu fifoBytes=%llu scanoutImages=%llu emptyScanouts=%llu presented=%llu readbackFailures=%llu\n",
                          (unsigned long long)m_stats.latches, (unsigned long long)m_stats.gifPackets,
                          (unsigned long long)m_stats.nativeFallbacks, (unsigned long long)m_stats.fifoRequests,
                          (unsigned long long)m_stats.fifoBytes,
-                         (unsigned long long)m_stats.scanoutImages, (unsigned long long)m_stats.emptyScanouts);
+                         (unsigned long long)m_stats.scanoutImages, (unsigned long long)m_stats.emptyScanouts,
+                         (unsigned long long)m_stats.presentedFrames, (unsigned long long)m_stats.readbackFailures);
     }
 
-    struct Stats { uint64_t gifPackets = 0, nativeFallbacks = 0, fifoRequests = 0, fifoBytes = 0, latches = 0, scanoutImages = 0, emptyScanouts = 0; } m_stats;
+    // Readback síncrono do scanout para a janela (raylib/OpenGL não compartilha
+    // a imagem Vulkan). Um buffer de staging persistente é realocado só quando
+    // o tamanho muda. Falha/formato inesperado mantém o quadro anterior vazio
+    // e o runtime cai para a apresentação CPU.
+    void readbackScanout(const ParallelGS::ScanoutResult &scanout)
+    {
+        const auto &image = *scanout.image;
+        if (image.get_format() != VK_FORMAT_R8G8B8A8_UNORM)
+        {
+            m_stats.readbackFailures++;
+            return;
+        }
+        const uint32_t w = image.get_width(), h = image.get_height();
+        const size_t bytes = static_cast<size_t>(w) * h * 4;
+        if (!m_readbackBuffer || m_readbackBytes != bytes)
+        {
+            Vulkan::BufferCreateInfo bufferInfo{};
+            bufferInfo.size = bytes;
+            bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            bufferInfo.domain = Vulkan::BufferDomain::CachedHost;
+            m_readbackBuffer = m_device.create_buffer(bufferInfo);
+            m_readbackBytes = bytes;
+            if (!m_readbackBuffer)
+            {
+                m_stats.readbackFailures++;
+                return;
+            }
+        }
+        auto cmd = m_device.request_command_buffer();
+        cmd->image_barrier(image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                           VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+        cmd->copy_image_to_buffer(*m_readbackBuffer, image, 0, {}, {w, h, 1}, 0, 0,
+                                  {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
+        cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                     VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
+        m_device.submit(cmd);
+        m_device.wait_idle();
+        const auto *rgba = static_cast<const uint8_t *>(
+            m_device.map_host_buffer(*m_readbackBuffer, Vulkan::MEMORY_ACCESS_READ_BIT));
+        if (!rgba)
+        {
+            m_stats.readbackFailures++;
+            return;
+        }
+        m_presentFrame.assign(rgba, rgba + bytes);
+        m_device.unmap_host_buffer(*m_readbackBuffer, Vulkan::MEMORY_ACCESS_READ_BIT);
+        m_presentWidth = w;
+        m_presentHeight = h;
+        if (++m_stats.presentedFrames == 1)
+            std::fprintf(stderr, "[dra2-gs] primeiro quadro GPU apresentado %ux%u\n", w, h);
+    }
+
+    bool copyPresentationFrame(std::vector<uint8_t> &outPixels, uint32_t &outWidth,
+                               uint32_t &outHeight) override
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        if (!m_present || m_presentFrame.empty() || !m_presentWidth || !m_presentHeight)
+            return false;
+        outPixels = m_presentFrame;
+        outWidth = m_presentWidth;
+        outHeight = m_presentHeight;
+        return true;
+    }
+
+    struct Stats { uint64_t gifPackets = 0, nativeFallbacks = 0, fifoRequests = 0, fifoBytes = 0, latches = 0, scanoutImages = 0, emptyScanouts = 0, presentedFrames = 0, readbackFailures = 0; } m_stats;
 
 private:
     PS2Runtime &m_runtime;
+    bool m_present = false;
+    std::vector<uint8_t> m_presentFrame;
+    uint32_t m_presentWidth = 0, m_presentHeight = 0;
+    Vulkan::BufferHandle m_readbackBuffer;
+    size_t m_readbackBytes = 0;
     Vulkan::Context m_context;
     Vulkan::Device m_device;
     ParallelGS::GSInterface m_gpu;
     bool m_ready = false, m_failed = false;
-    std::mutex m_mutex;
+    std::recursive_mutex m_mutex;
     uint64_t m_xferRegs[4] = {};
     uint32_t m_fifoTotal = 0, m_fifoQwords = 0;
     std::vector<uint8_t> m_fifoResidual;
@@ -397,12 +471,13 @@ namespace dra2_parallel_gs
 bool installIfRequested(PS2Runtime &runtime)
 {
     const char *backend = std::getenv("DRA2_GS_BACKEND");
-    if (!backend || std::strcmp(backend, "gpu-shadow"))
+    const bool present = backend && !std::strcmp(backend, "gpu-present");
+    if (!present && (!backend || std::strcmp(backend, "gpu-shadow")))
         return false;
-    static ShadowSink sink(runtime);
+    static ShadowSink sink(runtime, present);
     g_sink = &sink;
     runtime.gs().setGifSink(&sink);
-    std::fprintf(stderr, "[dra2-gs] DRA2_GS_BACKEND=gpu-shadow: sink instalado\n");
+    std::fprintf(stderr, "[dra2-gs] DRA2_GS_BACKEND=%s: sink instalado\n", backend);
     return true;
 }
 } // namespace dra2_parallel_gs
