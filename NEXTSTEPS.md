@@ -22,7 +22,7 @@ com o estado indicado quando já existe implementação parcial.
 | --- | --- | --- | --- |
 | 1 — Medição e teto | **Em progresso** | Contadores exclusivos, modo sem rasterização, captura/replay VU, 20 execuções sem debugger | Estabilizar/comprovar todos os cenários, apresentações únicas, carregamentos e feedback de VRAM |
 | 2 — Prova GS acelerado | **Em progresso** | Avaliação paraLLEl-GS, captura real, replay CPU/Vulkan e ganho GS de 37,25× em cinco pares | Aprovar equivalência visual e concluir cobertura e custos da apresentação |
-| 3 — Integrar GPU ao jogo | **Em progresso** | Costura GSGifSink (patch 0016), adaptador shadow executado no jogo (60/120 s, sem crash), seleção DRA2_GS_BACKEND | Apresentação GPU na janela, sinais a partir da GPU e promoção a backend autoritativo |
+| 3 — Integrar GPU ao jogo | **Em progresso** | Costura GSGifSink (patch 0016), adaptador shadow executado no jogo (60/120 s, sem crash), seleção DRA2_GS_BACKEND, apresentação GPU na janela (`gpu-present`, patch 0024) | Sinais a partir da GPU, promoção a backend autoritativo e caminho de apresentação sem readback síncrono |
 | 4 — Acelerar VU1 | **Não iniciada** | Instrumentação/replay preparatório pertence à etapa 1 | Inventário dos programas caros, substituição/recompilação e validação diferencial |
 | 5 — Validar partida e orçamento | **Não iniciada** | Nenhuma validação de partida nesta rodada | Partida completa, áudio/entrada, cadência original e orçamento de quadro |
 

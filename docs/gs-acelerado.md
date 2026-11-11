@@ -214,8 +214,25 @@ não mudam. Os callbacks são serializados por mutex próprio, porque
 `onLatch` é chamado sem o mutex de estado do frontend. A cada 300 latches
 o stderr recebe `[dra2-gs] shadow latches=... gif=... nativeFallbacks=...
 fifoReq=... fifoBytes=...`. Sem Vulkan, o sink se desliga com aviso e o
-jogo segue no CPU. Apresentação GPU na janela e promoção a backend
-autoritativo não fazem parte deste modo.
+jogo segue no CPU.
+
+### Apresentação GPU na janela (`gpu-present`)
+
+Com `DRA2_GS_BACKEND=gpu-present` (mesmo build), a janela raylib mostra o
+scanout do paraLLEl-GS: após o `vsync`, o sink faz readback síncrono da
+imagem Vulkan para um buffer de staging persistente, reduz o supersample
+horizontal (2560→640) por média de caixa até `internal_width`, força alfa
+opaco e entrega o quadro RGBA ao runtime pelo patch 0024
+(`GSGifSink::copyPresentationFrame`). Sem quadro GPU (ou em modo captura),
+o runtime mantém a apresentação CPU. O CPU continua autoritativo para
+VRAM, readback ao EE e SIGNAL/FINISH; só a imagem da janela muda. O
+readback síncrono por latch é simples e correto, mas não é o caminho de
+desempenho final (sem interop Vulkan↔OpenGL nem fila de quadros).
+Validação de 10/11: abertura renderizada pela GPU na janela por 50 s,
+`presented=296` em 300 latches, sem falhas de readback; captura lado a
+lado com o CPU em `.cache/performance/parallelgs-present/`. A imagem GPU
+difere da CPU nos pontos já conhecidos das divergências de rasterização;
+não houve aceite visual de equivalência.
 
 ## Scanout diagnóstico NTSC (continuação)
 
