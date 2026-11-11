@@ -234,6 +234,15 @@ lado com o CPU em `.cache/performance/parallelgs-present/`. A imagem GPU
 difere da CPU nos pontos já conhecidos das divergências de rasterização;
 não houve aceite visual de equivalência.
 
+Desempenho (patch 0025): no modo presente o sink pede
+`skipCpuRaster` e o backend CPU pula o desenho por pixel (uploads e
+transferências continuam; VRAM CPU de regiões desenhadas fica
+desatualizada para readback). Medido na abertura sem entrada, janela de
+15–35 s: CPU 7,10 quadros guest/s contra 21,05 do `gpu-present`
+(GS CPU 17,07 s → 0,34 s). Não é benchmark de cenas idênticas: o modo
+rápido avança mais no mesmo tempo de parede. O próximo custo é o EE e o
+`present` (8,6 s, incluindo o readback síncrono).
+
 ## Scanout diagnóstico NTSC (continuação)
 
 ```bash

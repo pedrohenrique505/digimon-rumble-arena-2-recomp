@@ -57,6 +57,35 @@ entrega; não há interop Vulkan↔OpenGL, fila de quadros nem zero-copy.
   sem `DRA2_GS_BACKEND`, caminho CPU intacto (captura baseline acima);
   `tools/apply_upstream_patches.sh` reconhece os 24 patches.
 
+## Correção no mesmo dia: ganho de desempenho (patch 0025)
+
+A primeira forma do `gpu-present` não ganhava nada — medido com
+`PS2X_PERF` + contador guest `0x538930`, janela de 15–35 s do processo,
+mesma abertura sem entrada:
+
+| Modo | Quadros guest/s | GS CPU (s) | Present CPU (s) |
+| --- | ---: | ---: | ---: |
+| CPU | 7,10 | 17,07 | 2,31 |
+| `gpu-present` (shadow + readback) | 6,84 | 14,61 | 4,79 |
+| `gpu-present` + `PS2X_NO_RASTER=1` | 17,09 | 0,58 | 8,04 |
+| `gpu-present` com patch 0025 | **21,05** | **0,34** | 8,60 |
+
+Causa: o modo shadow duplicava o trabalho — o raster CPU continuava
+desenhando tudo e o readback síncrono somava custo. O patch 0025
+(commit `450a840` no clone; `f42d763` na raiz) expõe
+`GSGifSink::skipCpuRaster` → `GSRasterBackend::setRasterEnabled`: no
+modo presente, o backend CPU continua consumindo comandos, uploads e
+transferências, mas pula `DrawPrimitive` e clears por pixel. Sem a
+variável de ambiente, o `gpu-present` passou a 21,05 quadros/s
+(~3× o CPU nesta cena; as cenas divergem entre execuções porque o modo
+rápido avança mais no mesmo tempo de parede — não é benchmark de cenas
+idênticas). A captura da janela continua mostrando a cena GPU
+(`window-gpu-present-fixed.png`). Trade-off aceito nesta etapa: regiões
+desenhadas não existem mais na VRAM CPU, então readback local→host de
+área renderizada fica desatualizado (uploads seguem válidos). O custo
+seguinte é o EE (~19,7 s de CPU na janela) e o `present` (8,6 s, que
+inclui o readback síncrono).
+
 ## Próximo passo
 
 Sinais SIGNAL/FINISH a partir da GPU e promoção a backend autoritativo
