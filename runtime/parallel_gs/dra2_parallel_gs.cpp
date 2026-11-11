@@ -421,9 +421,33 @@ public:
             m_stats.readbackFailures++;
             return;
         }
-        m_presentFrame.assign(rgba, rgba + bytes);
+        // O scanout pode vir em supersample horizontal (ex.: 2560 para uma
+        // largura interna de 640). Reduz por média de caixa pelo fator
+        // inteiro até a largura interna antes de entregar à janela 640px.
+        const uint32_t targetW = (scanout.internal_width && scanout.internal_width < w)
+                                     ? scanout.internal_width : w;
+        if (targetW < w && targetW && w % targetW == 0)
+        {
+            const uint32_t factor = w / targetW;
+            m_presentFrame.assign(static_cast<size_t>(targetW) * h * 4, 0);
+            for (uint32_t y = 0; y < h; y++)
+                for (uint32_t x = 0; x < targetW; x++)
+                    for (unsigned ch = 0; ch < 4; ch++)
+                    {
+                        uint32_t sum = 0;
+                        for (uint32_t k = 0; k < factor; k++)
+                            sum += rgba[(static_cast<size_t>(y) * w + x * factor + k) * 4 + ch];
+                        m_presentFrame[(static_cast<size_t>(y) * targetW + x) * 4 + ch] =
+                            static_cast<uint8_t>(sum / factor);
+                    }
+            m_presentWidth = targetW;
+        }
+        else
+        {
+            m_presentFrame.assign(rgba, rgba + bytes);
+            m_presentWidth = w;
+        }
         m_device.unmap_host_buffer(*m_readbackBuffer, Vulkan::MEMORY_ACCESS_READ_BIT);
-        m_presentWidth = w;
         m_presentHeight = h;
         if (++m_stats.presentedFrames == 1)
             std::fprintf(stderr, "[dra2-gs] primeiro quadro GPU apresentado %ux%u\n", w, h);
