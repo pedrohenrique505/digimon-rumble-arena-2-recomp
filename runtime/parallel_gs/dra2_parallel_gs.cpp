@@ -447,8 +447,20 @@ public:
             m_presentFrame.assign(rgba, rgba + bytes);
             m_presentWidth = w;
         }
+        // O scanout pode trazer alfa zero; a textura da janela modula por
+        // alfa e o quadro sumiria. Apresentação é opaca.
+        uint64_t rgbSum = 0;
+        for (size_t i = 0; i + 3 < m_presentFrame.size(); i += 4)
+        {
+            rgbSum += m_presentFrame[i] + m_presentFrame[i + 1] + m_presentFrame[i + 2];
+            m_presentFrame[i + 3] = 0xff;
+        }
         m_device.unmap_host_buffer(*m_readbackBuffer, Vulkan::MEMORY_ACCESS_READ_BIT);
         m_presentHeight = h;
+        if (m_stats.presentedFrames == 0)
+            std::fprintf(stderr, "[dra2-gs] brilho médio do primeiro quadro GPU: %llu\n",
+                         (unsigned long long)(m_presentFrame.empty() ? 0
+                            : rgbSum / (m_presentFrame.size() / 4 * 3)));
         if (++m_stats.presentedFrames == 1)
             std::fprintf(stderr, "[dra2-gs] primeiro quadro GPU apresentado %ux%u\n", w, h);
     }
