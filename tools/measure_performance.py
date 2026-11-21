@@ -61,7 +61,7 @@ def main():
     parser.add_argument('output', type=Path)
     parser.add_argument('--binary', type=Path, default=ROOT / 'build/dra2')
     parser.add_argument('--pairs', type=int, default=5)
-    parser.add_argument('--compare', choices=['matrix', 'raster', 'trace', 'probe'], default='matrix')
+    parser.add_argument('--compare', choices=['matrix', 'raster', 'trace', 'probe', 'gpu'], default='matrix')
     parser.add_argument('--frame-start', type=int, default=200)
     parser.add_argument('--frame-end', type=int, default=260)
     parser.add_argument('--timeout', type=float, default=120)
@@ -87,7 +87,7 @@ def main():
     (out / 'metadata.json').write_text(json.dumps(metadata, indent=2))
     variants = {'matrix': ['baseline', 'trace', 'no-raster', 'no-probe'],
                 'raster': ['baseline', 'no-raster'], 'trace': ['baseline', 'trace'],
-                'probe': ['baseline', 'no-probe']}[args.compare]
+                'probe': ['baseline', 'no-probe'], 'gpu': ['baseline', 'gpu-present']}[args.compare]
     results = []
     for pair in range(args.pairs):
         for variant in (variants if pair % 2 == 0 else list(reversed(variants))):
@@ -95,9 +95,11 @@ def main():
             run.mkdir()
             env = dict(os.environ, PS2X_PERF=str(run / 'timing.jsonl'), PS2X_PERF_COUNTER='0x538930',
                        PS2X_PERF_FRAME_PC='0x3a2460', PS2X_PERF_FRAMES=str(run / 'frames.jsonl'))
-            for key in ['PS2X_NO_RASTER', 'PS2X_GS_CAPTURE', 'PS2X_VU_CAPTURE', 'DRA2_TRACE_GS', 'DRA2_TRACE_RPC']:
+            for key in ['PS2X_NO_RASTER', 'PS2X_GS_CAPTURE', 'PS2X_VU_CAPTURE', 'DRA2_TRACE_GS', 'DRA2_TRACE_RPC', 'DRA2_GS_BACKEND']:
                 env.pop(key, None)
-            if variant == 'no-probe':
+            if variant == 'gpu-present':
+                env['DRA2_GS_BACKEND'] = 'gpu-present'
+            elif variant == 'no-probe':
                 env.pop('PS2X_PERF', None)
             elif variant == 'no-raster':
                 env['PS2X_NO_RASTER'] = '1'
@@ -123,6 +125,8 @@ def main():
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait()
+            if variant == 'gpu-present' and '[dra2-gs] DRA2_GS_BACKEND=gpu-present: sink instalado' not in (run / 'stdout.log').read_text(errors='replace'):
+                raise RuntimeError('GPU sink was not installed; check build configuration and log')
             result = summarize(read_records(run / 'frames.jsonl'), read_records(run / 'timing.jsonl'),
                                args.frame_start, args.frame_end)
             result.update(pair=pair, variant=variant, card_unchanged=before == card())

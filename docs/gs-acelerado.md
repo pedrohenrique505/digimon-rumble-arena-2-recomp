@@ -25,6 +25,12 @@ export DRA2_ISO='/caminho/para/Digimon Rumble Arena 2 (USA).iso'
 python3 tools/measure_performance.py .cache/performance/minha-matriz
 ```
 
+Para comparar CPU e apresentação GPU no mesmo binário compilado com
+`DRA2_ENABLE_PARALLEL_GS=ON`, use `--compare gpu`. A coleta alterna a ordem
+das variantes e verifica se o sink GPU foi instalado. O modo GPU continua
+experimental: a VRAM CPU não contém os pixels rasterizados pela GPU e o
+resultado não comprova equivalência visual.
+
 O padrão faz cinco execuções de cada variante: baseline, tracing diagnóstico,
 sem rasterização e sem contadores de subsistema. A ordem se inverte a cada
 rodada. O binário, otimização e memory card são os mesmos; hashes e configuração
