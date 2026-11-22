@@ -126,10 +126,40 @@ public:
             off += 16;
             if (flg == 0)
             {
-                for (uint32_t i = 0, n = nloop * nreg; i < n && off + 16 <= sizeBytes; i++, off += 16)
-                    if (((tagHi >> ((i % nreg) * 4)) & 0xf) == 0x0e &&
-                        (load64(off + 8) & 0xff) >= 0x50 && (load64(off + 8) & 0xff) <= 0x53)
-                        regs[(load64(off + 8) & 0xff) - 0x50] = load64(off);
+                uint32_t adMask = 0;
+                for (uint32_t r = 0; r < nreg; ++r)
+                    if (((tagHi >> (r * 4)) & 0xf) == 0x0e)
+                        adMask |= (1u << r);
+                const size_t totalQwords = static_cast<size_t>(nloop) * nreg;
+                if (adMask == 0)
+                {
+                    const size_t payloadBytes = totalQwords * 16;
+                    off += (payloadBytes <= sizeBytes - off) ? payloadBytes : ((sizeBytes - off) & ~size_t(15));
+                }
+                else if (nreg == 1)
+                {
+                    for (uint32_t i = 0; i < nloop && off + 16 <= sizeBytes; ++i, off += 16)
+                    {
+                        const uint64_t addr = load64(off + 8) & 0xff;
+                        if (addr >= 0x50 && addr <= 0x53)
+                            regs[addr - 0x50] = load64(off);
+                    }
+                }
+                else
+                {
+                    for (uint32_t loop = 0; loop < nloop && off + 16 <= sizeBytes; ++loop)
+                    {
+                        for (uint32_t r = 0; r < nreg && off + 16 <= sizeBytes; ++r, off += 16)
+                        {
+                            if ((adMask >> r) & 1u)
+                            {
+                                const uint64_t addr = load64(off + 8) & 0xff;
+                                if (addr >= 0x50 && addr <= 0x53)
+                                    regs[addr - 0x50] = load64(off);
+                            }
+                        }
+                    }
+                }
             }
             else if (flg == 1)
             {
