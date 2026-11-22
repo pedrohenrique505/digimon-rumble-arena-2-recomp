@@ -128,7 +128,7 @@ def lower_writes_vi_delay(lo: int, hi: int) -> int:
     return 0
 
 
-def emit_upper(hi: int) -> str:
+def emit_upper(hi: int, norm_vf: list[int] | None = None) -> str:
     op = hi & 0x3F
     dest = u_dest(hi)
     ft = u_ft(hi)
@@ -136,7 +136,9 @@ def emit_upper(hi: int) -> str:
     fd = u_fd(hi)
 
     def nvf(reg: int, lane: int) -> str:
-        return f"vf[0][{lane}]" if reg == 0 else f"vuNorm(vf[{reg}][{lane}])"
+        if reg == 0 or (norm_vf is not None and (norm_vf[reg] & (8 >> lane))):
+            return f"vf[{reg}][{lane}]"
+        return f"vuNorm(vf[{reg}][{lane}])"
 
     if op < 0x3C:
         if fd == 0 or dest == 0:
@@ -574,9 +576,53 @@ def lower_stalls_on_q(lo: int, hi: int) -> bool:
     return False
 
 
-def emit_pair_body(lo: int, hi: int, is_delay_slot: bool = False) -> str:
+def update_norm_vf_upper(hi: int, norm_vf: list[int]) -> None:
+    op = hi & 0x3F
+    dest = u_dest(hi)
+    if dest == 0:
+        return
+    if op < 0x3C:
+        fd = u_fd(hi)
+        if fd == 0:
+            return
+        # MAX / MINI do raw integer-bit comparison without normalizing denormals/Inf.
+        if (0x10 <= op <= 0x17) or op in (0x1D, 0x1F, 0x2B, 0x2F):
+            norm_vf[fd] &= ~dest
+        else:
+            norm_vf[fd] |= dest
+        return
+    sp = (hi & 3) | ((hi >> 4) & 0x7C)
+    ft = u_ft(hi)
+    if ft == 0:
+        return
+    if sp in (0x10, 0x11, 0x12, 0x13, 0x1D):  # ITOF0/4/12/15, ABS
+        norm_vf[ft] |= dest
+    elif sp in (0x14, 0x15, 0x16, 0x17):  # FTOI0/4/12/15
+        norm_vf[ft] &= ~dest
+
+
+def update_norm_vf_lower(lo: int, hi: int, norm_vf: list[int]) -> None:
+    if (hi & 0x80000000) or lo == 0 or lo == 0x8000033C:
+        return
+    top = (lo >> 25) & 0x7F
+    dest = (lo >> 21) & 0xF
+    ft = (lo >> 16) & 0x1F
+    if top == 0x00:  # LQ
+        if ft: norm_vf[ft] &= ~dest
+        return
+    if top == 0x40:
+        funct = lo & 0x3F
+        if funct >= 0x3C:
+            f2 = (lo & 3) | ((lo >> 4) & 0x7C)
+            if f2 in (0x30, 0x31, 0x34, 0x35, 0x3D, 0x40, 0x41, 0x42, 0x43):  # MOVE, MR32, LQI, LQD, MFIR, RNEXT, RGET, RINIT, RXOR
+                if ft: norm_vf[ft] &= ~dest
+            elif f2 in (0x70, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x7C, 0x7D):  # EFU/MFP
+                if ft: norm_vf[ft] &= ~dest
+
+
+def emit_pair_body(lo: int, hi: int, is_delay_slot: bool = False, norm_vf: list[int] | None = None, next_needs_bvi: bool = True) -> str:
     """Emit execution of one non-branch (or delay-slot) VU1 pair, updating clipPipe and bVi."""
-    u_code = emit_upper(hi)
+    u_code = emit_upper(hi, norm_vf)
     i_bit = bool(hi & 0x80000000)
     l_code = ""
     if i_bit:
@@ -592,7 +638,7 @@ def emit_pair_body(lo: int, hi: int, is_delay_slot: bool = False) -> str:
     parts = []
     if lower_stalls_on_q(lo, hi):
         parts.append("if (qPipe.delay) { bViReg = 0; cyc += qPipe.delay; } vuWaitQ(qPipe, clipPipe, clip, q, status);")
-    if vi_w != 0:
+    if vi_w != 0 and next_needs_bvi:
         parts.append(f"int32_t _oldVi = vi[{vi_w}];")
     if shadow:
         parts.append(f"float _sh[4]; std::memcpy(_sh, vf[{u_wr}], 16);")
@@ -608,19 +654,65 @@ def emit_pair_body(lo: int, hi: int, is_delay_slot: bool = False) -> str:
         if l_code:
             parts.append(l_code)
 
+    if norm_vf is not None:
+        update_norm_vf_upper(hi, norm_vf)
+        update_norm_vf_lower(lo, hi, norm_vf)
+        if shadow:
+            # Upper write was restored last over lower write
+            update_norm_vf_upper(hi, norm_vf)
+
     if vi_lsu != 0:
         parts.append(f"viReady[{vi_lsu}] = cyc + 4u;")
-    if vi_w != 0:
-        parts.append(f"bViReg = {vi_w}; bViVal = _oldVi;")
-    else:
-        parts.append("bViReg = 0;")
+    if next_needs_bvi:
+        if vi_w != 0:
+            parts.append(f"bViReg = {vi_w}; bViVal = _oldVi;")
+        else:
+            parts.append("bViReg = 0;")
     parts.append("++cyc; vuTickPipes(clipPipe, clip, qPipe, q, status);")
     return " ".join(parts)
+
+
+def collect_leaders(pairs: list[tuple[int, int]], code_len: int) -> set[int]:
+    """Identify all basic-block leaders (entry points, branch targets, BAL/JR continuations,
+    post-zero starts, and alternate shader entry points following short preambles)."""
+    leaders: set[int] = {0x0000, 0x0050}
+    after_uncond: set[int] = set()
+    n = len(pairs)
+    for idx, (lo, hi) in enumerate(pairs):
+        if lo == 0 and hi == 0:
+            continue
+        pc = idx * 8
+        if hi & 0x40000000:
+            nxt = (pc + 16) & 0x3FFF
+            leaders.add(nxt)
+            after_uncond.add(nxt)
+        if idx > 0 and pairs[idx - 1] == (0, 0):
+            leaders.add(pc)
+        binfo = branch_info(lo, hi, pc, code_len)
+        if binfo is not None:
+            top, _, _, target = binfo
+            if target is not None:
+                leaders.add(target)
+            if top in (0x20, 0x21, 0x24, 0x25):  # B, BAL, JR, JALR
+                nxt = (pc + 16) & 0x3FFF
+                leaders.add(nxt)
+                after_uncond.add(nxt)
+    # Multi-entry VU1 shaders often have a 2-4 instruction preamble after B/JR/E-bit
+    # followed by an alternate entry starting with upper NOP (0x000002FF).
+    for base in list(after_uncond):
+        for delta in (8, 16, 24, 32):
+            p = (base + delta) & 0x3FFF
+            idx = p // 8
+            if idx < n and pairs[idx][1] == 0x000002FF:
+                leaders.add(p)
+    return {pc for pc in leaders if (pc // 8) < n and pairs[pc // 8] != (0, 0)}
 
 
 def transpile_program(code: bytes, h: int) -> str:
     pairs = [struct.unpack_from("<II", code, i) for i in range(0, len(code), 8)]
     n = len(pairs)
+    leaders = collect_leaders(pairs, len(code))
+    is_branch_at = [branch_info(pairs[i][0], pairs[i][1], i * 8, len(code)) is not None for i in range(n)]
     out = []
     out.append(f"static bool vu1_prog_{h:016x}(VU1State &st, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory, uint64_t *outGifHash, uint64_t *outGifBytes, bool replaySink)")
     out.append("{")
@@ -645,24 +737,27 @@ def transpile_program(code: bytes, h: int) -> str:
     out.append("    goto dispatch;")
     out.append("dispatch:")
     out.append("    switch (pc) {")
-    for idx in range(n):
-        lo, hi = pairs[idx]
-        if lo != 0 or hi != 0:
-            out.append(f"    case 0x{idx*8:04x}u: goto L_{idx*8:04x};")
+    for pc in sorted(leaders):
+        out.append(f"    case 0x{pc:04x}u: goto L_{pc:04x};")
     out.append("    default: return false;")
     out.append("    }")
 
+    norm_vf = [0xF] + [0] * 31
     for idx in range(n):
         lo, hi = pairs[idx]
         if lo == 0 and hi == 0:
+            norm_vf = [0xF] + [0] * 31
             continue
         pc = idx * 8
-        out.append(f"L_{pc:04x}: {{")
+        if pc in leaders:
+            norm_vf = [0xF] + [0] * 31
+            out.append(f"L_{pc:04x}:")
+        out.append("{")
         e_bit = bool(hi & 0x40000000)
         binfo = branch_info(lo, hi, pc, len(code))
         if binfo is not None:
             top, vis, vit, target = binfo
-            u_code = emit_upper(hi)
+            u_code = emit_upper(hi, norm_vf)
             cond = None
             indirect = False
             link_reg = 0
@@ -696,6 +791,7 @@ def transpile_program(code: bytes, h: int) -> str:
             out.append(f"    bool _taken = {cond};")
             if u_code:
                 out.append(f"    {u_code}")
+            update_norm_vf_upper(hi, norm_vf)
             if link_reg != 0:
                 out.append(f"    vi[{link_reg}] = (int32_t)((0x{pc:04x}u + 16u) / 8u);")
             out.append("    bViReg = 0; ++cyc; vuTickPipes(clipPipe, clip, qPipe, q, status);")
@@ -703,7 +799,7 @@ def transpile_program(code: bytes, h: int) -> str:
                 d_lo, d_hi = pairs[idx + 1]
                 d_ebit = bool(d_hi & 0x40000000)
                 out.append(f"    if (_taken) {{")
-                out.append(f"        {emit_pair_body(d_lo, d_hi, True)}")
+                out.append(f"        {emit_pair_body(d_lo, d_hi, True, list(norm_vf), True)}")
                 if e_bit:
                     out.append(f"        pc = 0x{(pc+16)&0x3FFF:04x}u; goto done;")
                 elif d_ebit:
@@ -714,11 +810,12 @@ def transpile_program(code: bytes, h: int) -> str:
                     out.append(f"        goto L_{target:04x};")
                 out.append("    }")
         else:
-            out.append(f"    {emit_pair_body(lo, hi, False)}")
+            next_needs_bvi = (idx + 1 < n) and is_branch_at[idx + 1]
+            out.append(f"    {emit_pair_body(lo, hi, False, norm_vf, next_needs_bvi)}")
             if e_bit:
                 if idx + 1 < n:
                     d_lo, d_hi = pairs[idx + 1]
-                    out.append(f"    {emit_pair_body(d_lo, d_hi, True)}")
+                    out.append(f"    {emit_pair_body(d_lo, d_hi, True, list(norm_vf), False)}")
                 out.append(f"    pc = 0x{(pc+16)&0x3FFF:04x}u; goto done;")
         out.append("}")
 
