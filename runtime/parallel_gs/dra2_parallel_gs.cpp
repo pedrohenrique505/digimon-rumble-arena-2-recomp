@@ -65,7 +65,7 @@ public:
             return false;
         }
         m_device.set_context(m_context);
-        m_device.init_frame_contexts(4);
+        m_device.init_frame_contexts(8);
         ParallelGS::GSOptions opts{};
         if (!m_gpu.init(&m_device, opts))
         {
