@@ -4,6 +4,10 @@ Sessão dedicada a resolver a [issue #2](https://github.com/pedrohenrique505/dig
 (engasgo na transição `Multiplayer → Seleção de Personagens` e queda para ~30–36 FPS na tela de Seleção de Personagens sob `DRA2_GS_BACKEND=gpu-present`),
 seguindo o fluxo iterativo com **Ghidra MCP**, amostragem de pilhas via **REA/GDB** e commits pequenos validados a cada etapa.
 
+Os valores de FPS abaixo medem latches. A comparação com o PCSX2 mostrou
+que o runtime podia publicar 60 latches por segundo com a mesma imagem.
+A correção e as medições de conteúdo ficaram no [diagnóstico do scanout](2026-11-22-scanout-selecao-personagens.md).
+
 ## Identidade e evidências estáticas (Ghidra MCP)
 
 - Binário confirmado via `get_program_info`: `SLUS_210.67` (`r5900:LE:32:default`, entry `0x100008`, SHA-256 `590f453c7e39faeec8a2e46352b2655a18d1eb6e12fe693fe75583efcd15dacd`, 13.890 funções).
