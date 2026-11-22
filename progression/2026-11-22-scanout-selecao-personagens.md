@@ -49,3 +49,13 @@ Com oito contextos, a seleção manteve 60,0 mudanças/s entre 24 e 34 s,
 com intervalo máximo de 18,5 ms. A janela de transição de 18 a 22 s teve
 46,8 mudanças/s e um intervalo de 66,4 ms. A equivalência visual da
 transição inteira com o PCSX2 ainda precisa de validação.
+
+## Verificação do menu principal
+
+Um replay separado termina antes de confirmar Multiplayer, deixando o
+menu estabilizar. Entre 23 e 27 s do trace de chamadas a `0x003a2460`,
+com o hash desligado, o contador guest avançou a 59,3/s no binário
+anterior e a 61,8/s no corrigido. Os maiores intervalos entre chamadas
+foram 30,2 e 21,5 ms. No binário final em `build/dra2`, com o hash
+ligado, a mesma faixa de tempo relativa ao primeiro scanout registrou
+58,2 quadros distintos/s, com intervalo máximo de 33,8 ms.
