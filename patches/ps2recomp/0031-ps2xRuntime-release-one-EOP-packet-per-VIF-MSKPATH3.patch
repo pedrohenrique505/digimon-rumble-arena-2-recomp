@@ -1,0 +1,117 @@
+diff --git a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+--- a/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
++++ b/ps2xRuntime/src/lib/ps2_vif1_interpreter.cpp
+@@ -79,6 +80,52 @@ namespace
+ 
+         return 0u;
+     }
++
++    size_t findFirstGifEopPacketEnd(const uint8_t *data, size_t sizeBytes, bool &outFoundEop)
++    {
++        outFoundEop = false;
++        size_t offset = 0u;
++        while (offset + 16u <= sizeBytes)
++        {
++            uint64_t tagLo = 0u;
++            std::memcpy(&tagLo, data + offset, sizeof(tagLo));
++            offset += 16u;
++
++            const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
++            const bool eop = ((tagLo >> 15u) & 1u) != 0u;
++            const uint8_t flg = static_cast<uint8_t>((tagLo >> 58u) & 0x3u);
++            uint32_t nreg = static_cast<uint32_t>((tagLo >> 60u) & 0xFu);
++            if (nreg == 0u)
++                nreg = 16u;
++
++            uint64_t payloadBytes = 0u;
++            if (flg == 0u) // PACKED
++            {
++                payloadBytes = static_cast<uint64_t>(nloop) * nreg * 16ull;
++            }
++            else if (flg == 1u) // REGLIST, padded to a quadword
++            {
++                payloadBytes = static_cast<uint64_t>(nloop) * nreg * 8ull;
++                payloadBytes = (payloadBytes + 15ull) & ~15ull;
++            }
++            else // IMAGE (2) or DISABLED (3)
++            {
++                payloadBytes = static_cast<uint64_t>(nloop) * 16ull;
++            }
++
++            if (payloadBytes > sizeBytes - offset)
++            {
++                return sizeBytes;
++            }
++            offset += static_cast<size_t>(payloadBytes);
++            if (eop)
++            {
++                outFoundEop = true;
++                return offset;
++            }
++        }
++        return sizeBytes;
++    }
+ }
+ 
+ void PS2Memory::processVIF0Data(uint32_t srcPhys, uint32_t sizeBytes)
+@@ -386,8 +439,41 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+             // VIF command docs: MSKPATH3 uses IMMEDIATE bit 15.
+             const bool wasMasked = m_path3Masked;
+             m_path3Masked = (imm & 0x8000u) != 0u;
+-            if (wasMasked && !m_path3Masked)
+-                flushMaskedPath3Packets();
++            if (wasMasked && !m_path3Masked && !m_path3MaskedFifo.empty())
++            {
++                // Release one EOP-delimited PATH3 GIF packet on unmask. If the
++                // VIF1 stream immediately re-masks PATH3 (standard texture
++                // streaming pulse), PATH3 pauses at that EOP boundary instead
++                // of dumping every queued texture upload for the whole frame.
++                while (!m_path3MaskedFifo.empty())
++                {
++                    auto &front = m_path3MaskedFifo.front();
++                    bool foundEop = false;
++                    const size_t pktEnd = findFirstGifEopPacketEnd(front.data(), front.size(), foundEop);
++                    if (pktEnd >= 16u)
++                    {
++                        if (m_gifArbiter)
++                        {
++                            m_gifArbiter->submit(GifPathId::Path3, front.data(), static_cast<uint32_t>(pktEnd), false);
++                            m_gifArbiter->drain();
++                        }
++                        else if (m_gifPacketCallback)
++                        {
++                            m_gifPacketCallback(front.data(), static_cast<uint32_t>(pktEnd));
++                        }
++                    }
++                    if (pktEnd >= front.size())
++                    {
++                        m_path3MaskedFifo.erase(m_path3MaskedFifo.begin());
++                    }
++                    else
++                    {
++                        front.erase(front.begin(), front.begin() + static_cast<std::ptrdiff_t>(pktEnd));
++                    }
++                    if (foundEop)
++                        break;
++                }
++            }
+             continue;
+         }
+         else if (opcode == VIF_MARK)
+@@ -398,6 +484,8 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+         }
+         else if (opcode == VIF_FLUSHE || opcode == VIF_FLUSH || opcode == VIF_FLUSHA)
+         {
++            if (opcode == VIF_FLUSHA && !m_path3Masked && !m_path3MaskedFifo.empty())
++                flushMaskedPath3Packets(true);
+             continue;
+         }
+         else if (opcode == VIF_MSCAL || opcode == VIF_MSCALF)
+@@ -780,4 +868,7 @@ void PS2Memory::processVIF1Data(const uint8_t *data, uint32_t sizeBytes)
+             continue;
+         }
+     }
++
++    if (!m_path3Masked && !m_path3MaskedFifo.empty())
++        flushMaskedPath3Packets(true);
+ }
