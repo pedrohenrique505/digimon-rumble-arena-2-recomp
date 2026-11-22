@@ -135,6 +135,9 @@ def emit_upper(hi: int) -> str:
     fs = u_fs(hi)
     fd = u_fd(hi)
 
+    def nvf(reg: int, lane: int) -> str:
+        return f"vf[0][{lane}]" if reg == 0 else f"vuNorm(vf[{reg}][{lane}])"
+
     if op < 0x3C:
         if fd == 0 or dest == 0:
             return ""
@@ -142,23 +145,23 @@ def emit_upper(hi: int) -> str:
         # Broadcast ops
         if op <= 0x03:  # ADDbc
             bc = op & 3
-            return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])+b);" for c in range(4) if dest & (8 >> c)) + \
+            return f"{{ float b={nvf(ft, bc)}; float r[4]; " + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}+b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op <= 0x07:  # SUBbc
             bc = op & 3
-            return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])-b);" for c in range(4) if dest & (8 >> c)) + \
+            return f"{{ float b={nvf(ft, bc)}; float r[4]; " + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}-b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op <= 0x0B:  # MADDbc
             bc = op & 3
-            return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+            return f"{{ float b={nvf(ft, bc)}; float r[4]; " + \
+                   " ".join(f"r[{c}]=vuMaddN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op <= 0x0F:  # MSUBbc
             bc = op & 3
-            return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+            return f"{{ float b={nvf(ft, bc)}; float r[4]; " + \
+                   " ".join(f"r[{c}]=vuMsubN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op <= 0x13:  # MAXbc
             bc = op & 3
@@ -172,12 +175,12 @@ def emit_upper(hi: int) -> str:
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op <= 0x1B:  # MULbc
             bc = op & 3
-            return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+            return f"{{ float b={nvf(ft, bc)}; float r[4]; " + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}*b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x1C:  # MULq
             return f"{{ float b=vuNorm(q); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}*b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x1D:  # MAXi
             return f"{{ float r[4]; " + \
@@ -185,7 +188,7 @@ def emit_upper(hi: int) -> str:
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x1E:  # MULi
             return f"{{ float b=vuNorm(regI); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}*b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x1F:  # MINIi
             return f"{{ float r[4]; " + \
@@ -193,47 +196,47 @@ def emit_upper(hi: int) -> str:
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x20:  # ADDq
             return f"{{ float b=vuNorm(q); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])+b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}+b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x21:  # MADDq
             return f"{{ float b=vuNorm(q); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMaddN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x22:  # ADDi
             return f"{{ float b=vuNorm(regI); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])+b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}+b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x23:  # MADDi
             return f"{{ float b=vuNorm(regI); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMaddN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x24:  # SUBq
             return f"{{ float b=vuNorm(q); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])-b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}-b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x25:  # MSUBq
             return f"{{ float b=vuNorm(q); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMsubN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x26:  # SUBi
             return f"{{ float b=vuNorm(regI); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])-b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}-b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x27:  # MSUBi
             return f"{{ float b=vuNorm(regI); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMsubN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x28:  # ADD
             return f"{{ float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])+vuNorm(vf[{ft}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}+{nvf(ft, c)});" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x29:  # MADD
             return f"{{ float r[4]; " + \
-                   " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],vf[{ft}][{c}]);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMaddN(acc[{c}],{nvf(fs, c)},{nvf(ft, c)});" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x2A:  # MUL
             return f"{{ float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])*vuNorm(vf[{ft}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}*{nvf(ft, c)});" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x2B:  # MAX
             return f"{{ float r[4]; " + \
@@ -241,14 +244,14 @@ def emit_upper(hi: int) -> str:
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x2C:  # SUB
             return f"{{ float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])-vuNorm(vf[{ft}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}-{nvf(ft, c)});" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x2D:  # MSUB
             return f"{{ float r[4]; " + \
-                   " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],vf[{ft}][{c}]);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMsubN(acc[{c}],{nvf(fs, c)},{nvf(ft, c)});" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x2E:  # OPMSUB
-            return f"{{ float r[4]={{vuMsub(acc[0],vf[{fs}][1],vf[{ft}][2]), vuMsub(acc[1],vf[{fs}][2],vf[{ft}][0]), vuMsub(acc[2],vf[{fs}][0],vf[{ft}][1]), 0.0f}}; " + \
+            return f"{{ float r[4]={{vuMsubN(acc[0],{nvf(fs, 1)},{nvf(ft, 2)}), vuMsubN(acc[1],{nvf(fs, 2)},{nvf(ft, 0)}), vuMsubN(acc[2],{nvf(fs, 0)},{nvf(ft, 1)}), 0.0f}}; " + \
                    emit_dest(dst, ["r[0]", "r[1]", "r[2]", "r[3]"], dest) + " }"
         if op == 0x2F:  # MINI
             return f"{{ float r[4]; " + \
@@ -273,100 +276,100 @@ def emit_upper(hi: int) -> str:
             return ""
         scales = {0x14: "1.0f", 0x15: "16.0f", 0x16: "4096.0f", 0x17: "32768.0f"}[sp]
         return f"{{ float r[4]; " + \
-               " ".join(f"{{ int32_t iv=vuFloatToInt(vuNorm(vf[{fs}][{c}]),{scales}); std::memcpy(&r[{c}],&iv,4); }}" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"{{ int32_t iv=vuFloatToInt({nvf(fs, c)},{scales}); std::memcpy(&r[{c}],&iv,4); }}" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest(f"vf[{ft}]", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x1D:  # ABS
         if ft == 0 or dest == 0:
             return ""
         return f"{{ float r[4]; " + \
-               " ".join(f"r[{c}]=std::fabs(vuNorm(vf[{fs}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=std::fabs({nvf(fs, c)});" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest(f"vf[{ft}]", [f"r[{c}]" for c in range(4)], dest) + " }"
     if dest == 0:
         return ""
     if sp <= 0x03:  # ADDAbc
         bc = sp & 3
-        return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])+b);" for c in range(4) if dest & (8 >> c)) + \
+        return f"{{ float b={nvf(ft, bc)}; float r[4]; " + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}+b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp <= 0x07:  # SUBAbc
         bc = sp & 3
-        return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])-b);" for c in range(4) if dest & (8 >> c)) + \
+        return f"{{ float b={nvf(ft, bc)}; float r[4]; " + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}-b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp <= 0x0B:  # MADDAbc
         bc = sp & 3
-        return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-               " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+        return f"{{ float b={nvf(ft, bc)}; float r[4]; " + \
+               " ".join(f"r[{c}]=vuMaddN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp <= 0x0F:  # MSUBAbc
         bc = sp & 3
-        return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-               " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+        return f"{{ float b={nvf(ft, bc)}; float r[4]; " + \
+               " ".join(f"r[{c}]=vuMsubN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if 0x18 <= sp <= 0x1B:  # MULAbc
         bc = sp & 3
-        return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+        return f"{{ float b={nvf(ft, bc)}; float r[4]; " + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}*b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x1C:  # MULAq
         return f"{{ float b=vuNorm(q); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}*b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x1E:  # MULAi
         return f"{{ float b=vuNorm(regI); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}*b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x20:  # ADDAq
         return f"{{ float b=vuNorm(q); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])+b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}+b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x21:  # MADDAq
         return f"{{ float b=vuNorm(q); float r[4]; " + \
-               " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMaddN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x22:  # ADDAi
         return f"{{ float b=vuNorm(regI); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])+b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}+b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x23:  # MADDAi
         return f"{{ float b=vuNorm(regI); float r[4]; " + \
-               " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMaddN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x24:  # SUBAq
         return f"{{ float b=vuNorm(q); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])-b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}-b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x25:  # MSUBAq
         return f"{{ float b=vuNorm(q); float r[4]; " + \
-               " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMsubN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x26:  # SUBAi
         return f"{{ float b=vuNorm(regI); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])-b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}-b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x27:  # MSUBAi
         return f"{{ float b=vuNorm(regI); float r[4]; " + \
-               " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMsubN(acc[{c}],{nvf(fs, c)},b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x28:  # ADDA
         return f"{{ float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])+vuNorm(vf[{ft}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}+{nvf(ft, c)});" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x29:  # MADDA
         return f"{{ float r[4]; " + \
-               " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],vf[{ft}][{c}]);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMaddN(acc[{c}],{nvf(fs, c)},{nvf(ft, c)});" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x2A:  # MULA
         return f"{{ float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])*vuNorm(vf[{ft}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}*{nvf(ft, c)});" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x2C:  # SUBA
         return f"{{ float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(vf[{fs}][{c}])-vuNorm(vf[{ft}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuNormRes({nvf(fs, c)}-{nvf(ft, c)});" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x2D:  # MSUBA
         return f"{{ float r[4]; " + \
-               " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],vf[{ft}][{c}]);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMsubN(acc[{c}],{nvf(fs, c)},{nvf(ft, c)});" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x2E:  # OPMULA
         return f"{{ float r[4]={{vuNormRes(vuNorm(vf[{fs}][1])*vuNorm(vf[{ft}][2])), vuNormRes(vuNorm(vf[{fs}][2])*vuNorm(vf[{ft}][0])), vuNormRes(vuNorm(vf[{fs}][0])*vuNorm(vf[{ft}][1])), 0.0f}}; " + \
@@ -611,7 +614,7 @@ def emit_pair_body(lo: int, hi: int, is_delay_slot: bool = False) -> str:
         parts.append(f"bViReg = {vi_w}; bViVal = _oldVi;")
     else:
         parts.append("bViReg = 0;")
-    parts.append("++cyc; vuTickClip(clipPipe, clip); vuTickQ(qPipe, q, status);")
+    parts.append("++cyc; vuTickPipes(clipPipe, clip, qPipe, q, status);")
     return " ".join(parts)
 
 
@@ -623,7 +626,7 @@ def transpile_program(code: bytes, h: int) -> str:
     out.append("{")
     out.append("    float vf[32][4]; std::memcpy(vf, st.vf, sizeof(vf));")
     out.append("    vf[0][0]=0.0f; vf[0][1]=0.0f; vf[0][2]=0.0f; vf[0][3]=1.0f;")
-    out.append("    float acc[4]; std::memcpy(acc, st.acc, sizeof(acc));")
+    out.append("    float acc[4]; for (int _c = 0; _c < 4; ++_c) acc[_c] = vuNorm(st.acc[_c]);")
     out.append("    int32_t vi[16]; std::memcpy(vi, st.vi, sizeof(vi)); vi[0]=0;")
     out.append("    float q = st.q, p = st.p, regI = st.i;")
     out.append("    uint32_t clip = st.clip, workingClip = st.clip, status = st.status;")
@@ -637,7 +640,7 @@ def transpile_program(code: bytes, h: int) -> str:
     out.append("        uint32_t tgt = cyc;")
     out.append("        if (r1 != 0 && viReady[r1] > tgt) tgt = viReady[r1];")
     out.append("        if (r2 != 0 && viReady[r2] > tgt) tgt = viReady[r2];")
-    out.append("        if (__builtin_expect(tgt > cyc, 0)) { bViReg = 0; while (cyc < tgt) { ++cyc; vuTickClip(clipPipe, clip); vuTickQ(qPipe, q, status); } }")
+    out.append("        if (__builtin_expect(tgt > cyc, 0)) { bViReg = 0; while (cyc < tgt) { ++cyc; vuTickPipes(clipPipe, clip, qPipe, q, status); } }")
     out.append("    };")
     out.append("    goto dispatch;")
     out.append("dispatch:")
@@ -695,7 +698,7 @@ def transpile_program(code: bytes, h: int) -> str:
                 out.append(f"    {u_code}")
             if link_reg != 0:
                 out.append(f"    vi[{link_reg}] = (int32_t)((0x{pc:04x}u + 16u) / 8u);")
-            out.append("    bViReg = 0; ++cyc; vuTickClip(clipPipe, clip); vuTickQ(qPipe, q, status);")
+            out.append("    bViReg = 0; ++cyc; vuTickPipes(clipPipe, clip, qPipe, q, status);")
             if idx + 1 < n:
                 d_lo, d_hi = pairs[idx + 1]
                 d_ebit = bool(d_hi & 0x40000000)
@@ -779,14 +782,24 @@ DRA2_ALWAYS_INLINE float vuNormRes(float v) noexcept
     return vuNorm(v);
 }
 
+DRA2_ALWAYS_INLINE float vuMaddN(float a, float b, float c) noexcept
+{
+    return vuNormRes(static_cast<float>(static_cast<double>(a) + static_cast<double>(b) * static_cast<double>(c)));
+}
+
+DRA2_ALWAYS_INLINE float vuMsubN(float a, float b, float c) noexcept
+{
+    return vuNormRes(static_cast<float>(static_cast<double>(a) - static_cast<double>(b) * static_cast<double>(c)));
+}
+
 DRA2_ALWAYS_INLINE float vuMadd(float a, float b, float c) noexcept
 {
-    return vuNormRes(static_cast<float>(static_cast<double>(vuNorm(a)) + static_cast<double>(vuNorm(b)) * static_cast<double>(vuNorm(c))));
+    return vuMaddN(vuNorm(a), vuNorm(b), vuNorm(c));
 }
 
 DRA2_ALWAYS_INLINE float vuMsub(float a, float b, float c) noexcept
 {
-    return vuNormRes(static_cast<float>(static_cast<double>(vuNorm(a)) - static_cast<double>(vuNorm(b)) * static_cast<double>(vuNorm(c))));
+    return vuMsubN(vuNorm(a), vuNorm(b), vuNorm(c));
 }
 
 DRA2_ALWAYS_INLINE float vuMinMax(float a, float b, bool maximum) noexcept
@@ -901,6 +914,23 @@ DRA2_ALWAYS_INLINE void vuTickQ(VuQPipe &qp, float &q, uint32_t &status) noexcep
         q = qp.val;
         status = (status & 0xFCFu) | qp.di | (qp.di << 6);
     }
+}
+
+DRA2_NOINLINE void vuTickPipesSlow(VuClipPipe &cp, uint32_t &clip, VuQPipe &qp, float &q, uint32_t &status) noexcept
+{
+    if (cp.pending)
+        vuTickClipSlow(cp, clip);
+    if (qp.delay && --qp.delay == 0)
+    {
+        q = qp.val;
+        status = (status & 0xFCFu) | qp.di | (qp.di << 6);
+    }
+}
+
+DRA2_ALWAYS_INLINE void vuTickPipes(VuClipPipe &cp, uint32_t &clip, VuQPipe &qp, float &q, uint32_t &status) noexcept
+{
+    if (__builtin_expect((cp.pending | qp.delay) != 0, 0))
+        vuTickPipesSlow(cp, clip, qp, q, status);
 }
 
 DRA2_ALWAYS_INLINE void vuWaitQ(VuQPipe &qp, VuClipPipe &cp, uint32_t &clip, float &q, uint32_t &status) noexcept
