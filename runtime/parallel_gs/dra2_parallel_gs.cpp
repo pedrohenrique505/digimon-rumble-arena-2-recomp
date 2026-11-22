@@ -419,7 +419,6 @@ public:
             }
             else
                 m_stats.emptyScanouts++;
-            m_device.next_frame_context();
             m_stats.latches++;
             if (m_stats.latches % 300 == 0)
                 std::fprintf(stderr,
