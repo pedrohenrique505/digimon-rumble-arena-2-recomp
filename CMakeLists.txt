@@ -34,6 +34,9 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64" AND NOT MSVC)
 endif()
 
 # Runtime e IOP do upstream. EXCLUDE_FROM_ALL: o ps2EntryRunner do upstream não é usado.
+# Desliga logs agressivos por padrão: PS2_FUNCTION_LOG_TRACKER faz flush() em disco
+# a cada entrada/saída de função MIPS (~4 MB/s e ~25% do tempo de quadro).
+option(PS2X_ENABLE_AGRESSIVE_LOGS "Enable very verbose/agressive PS2 runtime logs" OFF)
 set(PS2X_IS_ARM_TARGET OFF)
 add_subdirectory("${PS2RECOMP_DIR}/ps2xIOP" ps2xIOP EXCLUDE_FROM_ALL)
 add_subdirectory("${PS2RECOMP_DIR}/ps2xRuntime" ps2xRuntime EXCLUDE_FROM_ALL)
