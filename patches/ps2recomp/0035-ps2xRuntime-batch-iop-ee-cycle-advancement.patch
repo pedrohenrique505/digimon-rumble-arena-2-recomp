@@ -1,0 +1,70 @@
+diff --git a/ps2xIOP/src/emulator/iop_emulator.cpp b/ps2xIOP/src/emulator/iop_emulator.cpp
+--- a/ps2xIOP/src/emulator/iop_emulator.cpp
++++ b/ps2xIOP/src/emulator/iop_emulator.cpp
+@@ -753,6 +753,13 @@ namespace ps2x::iop::detail
+     void IopEmulator::runEeCycles(uint64_t eeCycles) noexcept
+     {
+         const uint64_t total = m_impl->eeCycleCarry + eeCycles;
++        // Batch tiny EE cycle slices (~14 us at 294.9 MHz) so EeScheduler::accountCycles
++        // doesn't enter the IOP scheduler loop hundreds of thousands of times per second.
++        if (total < 4096u)
++        {
++            m_impl->eeCycleCarry = total;
++            return;
++        }
+         const uint64_t iopCycles = total / 8u;
+         m_impl->eeCycleCarry = total % 8u;
+         if (iopCycles)
+@@ -761,6 +768,11 @@ namespace ps2x::iop::detail
+ 
+     RpcResult IopEmulator::handleRpc(const RpcRequest &request)
+     {
++        if (const uint64_t iopCycles = m_impl->eeCycleCarry / 8u; iopCycles != 0u)
++        {
++            m_impl->eeCycleCarry %= 8u;
++            m_impl->runCycles(iopCycles);
++        }
+         return m_impl->rpc.handleRpc(request, *m_impl);
+     }
+ 
+@@ -771,6 +783,11 @@ namespace ps2x::iop::detail
+ 
+     void IopEmulator::onSifTransfer(const SifTransfer &transfer)
+     {
++        if (const uint64_t iopCycles = m_impl->eeCycleCarry / 8u; iopCycles != 0u)
++        {
++            m_impl->eeCycleCarry %= 8u;
++            m_impl->runCycles(iopCycles);
++        }
+         m_impl->rpc.onSifTransfer(transfer);
+     }
+ 
+diff --git a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+--- a/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
++++ b/ps2xRuntime/src/lib/Kernel/EeScheduler.cpp
+@@ -399,7 +399,24 @@ void EeScheduler::accountCycles(uint32_t cycles) noexcept
+     const uint64_t elapsed = std::max<uint64_t>(1u, cycles);
+     m_eeCycle += elapsed;
+     m_pendingEeTimerInterrupts |= m_runtime.memory().advanceEeTimers(elapsed);
+-    m_runtime.advanceIopEeCycles(elapsed);
++
++    // Batch tiny EE cycle slices (~7 us at 294.9 MHz) before crossing into the
++    // IOP subsystem so hot EE loops do not invoke advanceIopEeCycles 500k+/sec.
++    static thread_local const EeScheduler *s_iopBatchOwner = nullptr;
++    static thread_local uint64_t s_iopBatchPending = 0u;
++    if (s_iopBatchOwner != this)
++    {
++        s_iopBatchOwner = this;
++        s_iopBatchPending = 0u;
++    }
++    s_iopBatchPending += elapsed;
++    if (s_iopBatchPending >= 2048u || m_pendingEeTimerInterrupts != 0u)
++    {
++        const uint64_t flushCycles = s_iopBatchPending;
++        s_iopBatchPending = 0u;
++        m_runtime.advanceIopEeCycles(flushCycles);
++    }
++
+     if (m_pendingEeTimerInterrupts != 0u)
+     {
+         m_checkpointPending.store(true, std::memory_order_release);
