@@ -47,7 +47,10 @@ set(RT_DIR "${PS2RECOMP_DIR}/ps2xRuntime")
 # Código recompilado (sem register_functions.cpp)
 # ---------------------------------------------------------------------------
 file(GLOB DRA2_GENERATED_SOURCES "${DRA2_GENERATED_DIR}/*.cpp")
-list(REMOVE_ITEM DRA2_GENERATED_SOURCES "${DRA2_GENERATED_DIR}/register_functions.cpp")
+list(REMOVE_ITEM DRA2_GENERATED_SOURCES
+    "${DRA2_GENERATED_DIR}/register_functions.cpp"
+    "${DRA2_GENERATED_DIR}/vu1_recompiled.cpp"
+)
 list(SORT DRA2_GENERATED_SOURCES)
 
 add_library(dra2_generated STATIC ${DRA2_GENERATED_SOURCES})
@@ -112,6 +115,15 @@ endif()
 # Offline diagnostic tool; never part of the normal game target.
 add_executable(dra2-vu-replay EXCLUDE_FROM_ALL tools/vu_replay.cpp)
 target_link_libraries(dra2-vu-replay PRIVATE ps2_runtime)
+
+# Microprogramas VU1 transpilados AOT (opcional, gerado por tools/vu1_transpile.py).
+# Compilado com -ffp-contract=off para preservar arredondamento exato de FMAC (bit-a-bit).
+if(EXISTS "${DRA2_GENERATED_DIR}/vu1_recompiled.cpp")
+    set_source_files_properties("${DRA2_GENERATED_DIR}/vu1_recompiled.cpp"
+        PROPERTIES COMPILE_OPTIONS "-ffp-contract=off")
+    target_sources(dra2 PRIVATE "${DRA2_GENERATED_DIR}/vu1_recompiled.cpp")
+    target_sources(dra2-vu-replay PRIVATE "${DRA2_GENERATED_DIR}/vu1_recompiled.cpp")
+endif()
 
 # Targeted HLE regression; no guest code or window required.
 add_executable(dra2-test-gs-crt EXCLUDE_FROM_ALL tools/test_gs_crt.cpp)
