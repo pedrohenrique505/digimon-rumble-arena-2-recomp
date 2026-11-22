@@ -1,0 +1,106 @@
+diff --git i/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp w/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 2c12ee4..2661dc3 100644
+--- i/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ w/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -40,10 +40,11 @@ namespace
+         bool programReadsFmacFlags = true;
+     };
+ 
+-    Vu1ActiveMasks &activeMasksFor(const VU1Interpreter *self) noexcept
++    inline Vu1ActiveMasks &activeMasksFor(const VU1Interpreter *self) noexcept
+     {
++        // Fast non-TLS lookup: typically only 1-2 VU interpreters exist on GameThread.
+         struct Slot { const VU1Interpreter *key = nullptr; Vu1ActiveMasks masks{}; };
+-        static thread_local Slot s_slots[4]{};
++        static Slot s_slots[4]{};
+         if (s_slots[0].key == self)
+             return s_slots[0].masks;
+         if (s_slots[1].key == self)
+@@ -1923,10 +1924,19 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         fastCodeCache = true;
+     }
+ 
++    Vu1ActiveMasks &masks = activeMasksFor(this);
++    auto hasAnyPending = [&]() noexcept -> bool
++    {
++        return m_fdiv.valid ||
++               (masks.flag | masks.efu | masks.store |
++                masks.vfWrite | masks.viWrite | masks.accWrite) != 0u;
++    };
++    if (hasAnyPending())
++        commitReadyPipelines();
++
+     DecodedInstructionPair fallbackDecoded{};
+     while (m_cycle < budgetEnd && !m_stopRequested)
+     {
+-        commitReadyPipelines();
+         if (m_state.pc + 8u > codeSize)
+             break;
+ 
+@@ -1948,7 +1958,15 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+                 advanceTo(budgetEnd);
+                 break;
+             }
+-            advanceTo(readyCycle);
++            if (!m_xgkick.active && !hasAnyPending())
++            {
++                m_cycle = readyCycle;
++                m_state.cycles = m_cycle;
++            }
++            else
++            {
++                advanceTo(readyCycle);
++            }
+             readyCycle = calculatePairReadyCycle(decoded);
+         }
+         if (m_cycle >= budgetEnd)
+@@ -1963,9 +1981,11 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+             oldVi = m_state.vi[writtenVi];
+         }
+ 
++        const bool upperIsNop = (decoded.upper & 0x7FFu) == 0x2FFu;
+         if (decoded.iBit)
+         {
+-            execUpper(decoded.upper);
++            if (!upperIsNop)
++                execUpper(decoded.upper);
+             float immediate = 0.0f;
+             std::memcpy(&immediate, &decoded.lower, sizeof(immediate));
+             m_state.i = immediate;
+@@ -1977,7 +1997,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+             std::memcpy(oldVf,
+                         m_state.vf[decoded.upperVfShadowReg],
+                         sizeof(oldVf));
+-            execUpper(decoded.upper);
++            if (!upperIsNop)
++                execUpper(decoded.upper);
+             std::memcpy(upperVf,
+                         m_state.vf[decoded.upperVfShadowReg],
+                         sizeof(upperVf));
+@@ -1991,8 +2012,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         }
+         else
+         {
+-            execUpper(decoded.upper);
+-            execLower(decoded.lower, vuData, dataSize, gs, memory, decoded.upper);
++            if (!upperIsNop)
++                execUpper(decoded.upper);
++            if (decoded.lower != 0x8000033Cu)
++                execLower(decoded.lower, vuData, dataSize, gs, memory, decoded.upper);
+         }
+ 
+         m_viBranchBackupValid = false;
+@@ -2056,7 +2079,12 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+             m_pendingHaltT = tHalt;
+         }
+ 
+-        advanceOneCycle();
++        ++m_cycle;
++        m_state.cycles = m_cycle;
++        if (hasAnyPending())
++            commitReadyPipelines();
++        if (m_xgkick.active)
++            progressXgkick();
+         if (programEnded)
+             break;
+     }
