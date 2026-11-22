@@ -1,0 +1,150 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -701,6 +701,7 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+     gscapture::Event capture(1, data, sizeBytes);
+     if (m_gifSink)
+         m_gifSink->onGifPacket(data, sizeBytes);
++    const bool skipRaster = (m_gifSink && m_gifSink->skipCpuRaster());
+     if (tryProcessNativeImageUploadPacket(data, sizeBytes))
+         return;
+ 
+@@ -758,6 +759,27 @@ void GS::processGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+ 
+         if (flg == GIF_FMT_PACKED)
+         {
++            if (skipRaster)
++            {
++                bool pureVertexOrNop = true;
++                for (uint32_t i = 0; i < nreg; ++i)
++                {
++                    const uint8_t reg = regs[i];
++                    if (!(reg <= 0x05u || reg == 0x0Au || reg == 0x0Cu || reg == 0x0Du || reg == 0x0Fu))
++                    {
++                        pureVertexOrNop = false;
++                        break;
++                    }
++                }
++                if (pureVertexOrNop)
++                {
++                    const uint64_t payloadBytes = static_cast<uint64_t>(nloop) * nreg * 16ull;
++                    if (payloadBytes > sizeBytes - offset)
++                        return;
++                    offset += static_cast<uint32_t>(payloadBytes);
++                    continue;
++                }
++            }
+             for (uint32_t loop = 0; loop < nloop; ++loop)
+             {
+                 for (uint32_t r = 0; r < nreg; ++r)
+@@ -811,6 +833,7 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+     gscapture::Event capture(1, data, sizeBytes);
+     if (m_gifSink)
+         m_gifSink->onGifPacket(data, sizeBytes);
++    const bool skipRaster = (m_gifSink && m_gifSink->skipCpuRaster());
+     const bool processed = visitPackedGifPacket(data, sizeBytes, [&](const PackedGifPacketTag &tag)
+                                                 {
+         m_curQ = 1.0f;
+@@ -825,6 +848,22 @@ bool GS::processNativePackedGIFPacket(const uint8_t *data, uint32_t sizeBytes)
+         if (pre)
+             writeRegisterUnlocked(GS_REG_PRIM, (tag.lo >> 47u) & 0x7FFu);
+ 
++        if (skipRaster)
++        {
++            bool pureVertexOrNop = true;
++            for (uint32_t i = 0u; i < tag.nreg; ++i)
++            {
++                const uint8_t reg = tag.regs[i];
++                if (!(reg <= 0x05u || reg == 0x0Au || reg == 0x0Cu || reg == 0x0Du || reg == 0x0Fu))
++                {
++                    pureVertexOrNop = false;
++                    break;
++                }
++            }
++            if (pureVertexOrNop)
++                return true;
++        }
++
+         uint32_t offset = tag.payloadOffset;
+         for (uint32_t loop = 0u; loop < tag.nloop; ++loop)
+         {
+@@ -1607,6 +1646,9 @@ void GS::writeRegisterUnlocked(uint8_t regAddr, uint64_t value)
+ 
+ void GS::vertexKick(bool drawing)
+ {
++    if (m_gifSink && m_gifSink->skipCpuRaster())
++        return;
++
+     ++m_vtxCount;
+     ++m_vtxIndex;
+ 
+diff --git a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+--- a/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
++++ b/ps2xRuntime/src/lib/gs/ps2_gif_arbiter.cpp
+@@ -38,19 +38,22 @@ void GifArbiter::drain()
+     if (!m_processFn)
+         return;
+ 
+-    std::stable_sort(m_queue.begin(), m_queue.end(),
+-                     [](const GifArbiterPacket &a, const GifArbiterPacket &b)
+-                     {
+-                         // DIRECTHL cannot preempt PATH3 IMAGE transfers.
+-                         if (a.path2DirectHl != b.path2DirectHl || a.path3Image != b.path3Image)
++    if (m_queue.size() > 1)
++    {
++        std::stable_sort(m_queue.begin(), m_queue.end(),
++                         [](const GifArbiterPacket &a, const GifArbiterPacket &b)
+                          {
+-                             if (a.path3Image && b.path2DirectHl)
+-                                 return true;
+-                             if (a.path2DirectHl && b.path3Image)
+-                                 return false;
+-                         }
+-                         return pathPriority(a.pathId) < pathPriority(b.pathId);
+-                     });
++                             // DIRECTHL cannot preempt PATH3 IMAGE transfers.
++                             if (a.path2DirectHl != b.path2DirectHl || a.path3Image != b.path3Image)
++                             {
++                                 if (a.path3Image && b.path2DirectHl)
++                                     return true;
++                                 if (a.path2DirectHl && b.path3Image)
++                                     return false;
++                             }
++                             return pathPriority(a.pathId) < pathPriority(b.pathId);
++                         });
++    }
+ 
+     for (size_t i = 0; i < m_queue.size(); ++i)
+     {
+diff --git a/ps2xRuntime/src/lib/ps2_memory.cpp b/ps2xRuntime/src/lib/ps2_memory.cpp
+--- a/ps2xRuntime/src/lib/ps2_memory.cpp
++++ b/ps2xRuntime/src/lib/ps2_memory.cpp
+@@ -2016,6 +2016,12 @@ void PS2Memory::submitGifPacket(GifPathId pathId, const uint8_t *data, uint32_t
+         flushMaskedPath3Packets(false);
+     }
+ 
++    if (drainImmediately && m_gifPacketCallback && (!m_gifArbiter || m_gifArbiter->empty()))
++    {
++        m_gifPacketCallback(data, sizeBytes);
++        return;
++    }
++
+     if (m_gifArbiter)
+         m_gifArbiter->submit(pathId, data, sizeBytes, path2DirectHl);
+     else if (m_gifPacketCallback)
+diff --git a/ps2xRuntime/src/lib/ps2_runtime.cpp b/ps2xRuntime/src/lib/ps2_runtime.cpp
+--- a/ps2xRuntime/src/lib/ps2_runtime.cpp
++++ b/ps2xRuntime/src/lib/ps2_runtime.cpp
+@@ -672,8 +672,10 @@ bool PS2Runtime::syncCoreSubsystems()
+     }
+ 
+     m_gs.init(gsVram, static_cast<uint32_t>(PS2_GS_VRAM_SIZE), &m_memory.gs());
+-    m_gifArbiter.setProcessPacketFn([this](const uint8_t *data, uint32_t size)
+-                                    { m_gs.processGIFPacket(data, size); });
++    auto processGif = [this](const uint8_t *data, uint32_t size)
++    { m_gs.processGIFPacket(data, size); };
++    m_gifArbiter.setProcessPacketFn(processGif);
++    m_memory.setGifPacketCallback(std::move(processGif));
+     m_memory.setGifArbiter(&m_gifArbiter);
+     m_memory.setVu1MscalCallback([this](uint32_t startPC, uint32_t top, uint32_t itop)
+                                  {
