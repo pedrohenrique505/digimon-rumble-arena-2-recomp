@@ -1,0 +1,30 @@
+diff --git a/ps2xRuntime/src/lib/gs/gs_frontend.cpp b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+--- a/ps2xRuntime/src/lib/gs/gs_frontend.cpp
++++ b/ps2xRuntime/src/lib/gs/gs_frontend.cpp
+@@ -1735,6 +1735,8 @@ void GS::vertexKick(bool drawing)
+ 
+ void GS::processImageData(const uint8_t *data, uint32_t sizeBytes)
+ {
++    if (m_gifSink && m_gifSink->skipCpuRaster())
++        return;
+     if (m_backend)
+         m_backend->UploadImage(data, sizeBytes);
+ }
+@@ -1747,6 +1749,8 @@ bool GS::clearFramebufferContext(uint32_t contextIndex, uint32_t rgba)
+     gscapture::Event capture(7,clear,sizeof(clear));
+     if (m_gifSink)
+         m_gifSink->onClear(contextIndex, rgba);
++    if (m_gifSink && m_gifSink->skipCpuRaster())
++        return true;
+     return m_backend && m_backend->ClearFramebuffer(m_ctx[(contextIndex != 0u) ? 1 : 0], rgba);
+ }
+ 
+@@ -1757,6 +1761,8 @@ bool GS::clearActiveFramebuffer(uint32_t rgba)
+     gscapture::Event capture(7,clear,sizeof(clear));
+     if (m_gifSink)
+         m_gifSink->onClear(m_prim.ctxt ? 1u : 0u, rgba);
++    if (m_gifSink && m_gifSink->skipCpuRaster())
++        return true;
+     return m_backend && m_backend->ClearFramebuffer(activeContext(), rgba);
+ }
+ 
