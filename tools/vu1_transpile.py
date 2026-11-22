@@ -88,19 +88,18 @@ def lower_reads_vf(lo: int, hi: int, reg: int) -> bool:
 
 
 def lower_writes_vi_delay(lo: int, hi: int) -> int:
-    """Return VI register written by lower op (1..15) if it delays next branch read, else 0."""
+    """Return VI register written by lower op (1..15) if it delays next branch read, else 0.
+    Matches VU1Interpreter::decodeLowerUsage (delaysNextBranchRead): only IALU, LQI/LQD, SQI/SQD, MTIR."""
     if (hi & 0x80000000) or lo == 0 or lo == 0x8000033C:
         return 0
     top = (lo >> 25) & 0x7F
-    if top in (0x04, 0x08, 0x09, 0x14, 0x16, 0x17, 0x18, 0x1A, 0x1B, 0x1C):
+    if top in (0x08, 0x09):  # IADDIU, ISUBIU
         return (lo >> 16) & 0xF
-    if top in (0x10, 0x12, 0x13):
-        return 1
     if top == 0x40:
         funct = lo & 0x3F
-        if funct in (0x30, 0x31, 0x34, 0x35):
+        if funct in (0x30, 0x31, 0x34, 0x35):  # IADD, ISUB, IAND, IOR
             return (lo >> 6) & 0xF
-        if funct == 0x32:
+        if funct == 0x32:  # IADDI
             return (lo >> 16) & 0xF
         if funct >= 0x3C:
             f2 = (lo & 3) | ((lo >> 4) & 0x7C)
@@ -108,7 +107,7 @@ def lower_writes_vi_delay(lo: int, hi: int) -> int:
                 return (lo >> 11) & 0xF
             if f2 in (0x35, 0x37):  # SQI, SQD (modifies it)
                 return (lo >> 16) & 0xF
-            if f2 in (0x3C, 0x3E, 0x68, 0x69):  # MTIR, ILWR, XTOP, XITOP
+            if f2 == 0x3C:  # MTIR
                 return (lo >> 16) & 0xF
     return 0
 
@@ -138,12 +137,12 @@ def emit_upper(hi: int) -> str:
         if op <= 0x0B:  # MADDbc
             bc = op & 3
             return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])+vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op <= 0x0F:  # MSUBbc
             bc = op & 3
             return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])-vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op <= 0x13:  # MAXbc
             bc = op & 3
@@ -182,7 +181,7 @@ def emit_upper(hi: int) -> str:
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x21:  # MADDq
             return f"{{ float b=vuNorm(q); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])+vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x22:  # ADDi
             return f"{{ float b=vuNorm(regI); float r[4]; " + \
@@ -190,7 +189,7 @@ def emit_upper(hi: int) -> str:
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x23:  # MADDi
             return f"{{ float b=vuNorm(regI); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])+vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x24:  # SUBq
             return f"{{ float b=vuNorm(q); float r[4]; " + \
@@ -198,7 +197,7 @@ def emit_upper(hi: int) -> str:
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x25:  # MSUBq
             return f"{{ float b=vuNorm(q); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])-vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x26:  # SUBi
             return f"{{ float b=vuNorm(regI); float r[4]; " + \
@@ -206,7 +205,7 @@ def emit_upper(hi: int) -> str:
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x27:  # MSUBi
             return f"{{ float b=vuNorm(regI); float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])-vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x28:  # ADD
             return f"{{ float r[4]; " + \
@@ -214,7 +213,7 @@ def emit_upper(hi: int) -> str:
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x29:  # MADD
             return f"{{ float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])+vuNorm(vf[{fs}][{c}])*vuNorm(vf[{ft}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],vf[{ft}][{c}]);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x2A:  # MUL
             return f"{{ float r[4]; " + \
@@ -230,10 +229,10 @@ def emit_upper(hi: int) -> str:
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x2D:  # MSUB
             return f"{{ float r[4]; " + \
-                   " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])-vuNorm(vf[{fs}][{c}])*vuNorm(vf[{ft}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+                   " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],vf[{ft}][{c}]);" for c in range(4) if dest & (8 >> c)) + \
                    " " + emit_dest(dst, [f"r[{c}]" for c in range(4)], dest) + " }"
         if op == 0x2E:  # OPMSUB
-            return f"{{ float r[4]={{vuNormRes(vuNorm(acc[0])-vuNorm(vf[{fs}][1])*vuNorm(vf[{ft}][2])), vuNormRes(vuNorm(acc[1])-vuNorm(vf[{fs}][2])*vuNorm(vf[{ft}][0])), vuNormRes(vuNorm(acc[2])-vuNorm(vf[{fs}][0])*vuNorm(vf[{ft}][1])), 0.0f}}; " + \
+            return f"{{ float r[4]={{vuMsub(acc[0],vf[{fs}][1],vf[{ft}][2]), vuMsub(acc[1],vf[{fs}][2],vf[{ft}][0]), vuMsub(acc[2],vf[{fs}][0],vf[{ft}][1]), 0.0f}}; " + \
                    emit_dest(dst, ["r[0]", "r[1]", "r[2]", "r[3]"], dest) + " }"
         if op == 0x2F:  # MINI
             return f"{{ float r[4]; " + \
@@ -281,12 +280,12 @@ def emit_upper(hi: int) -> str:
     if sp <= 0x0B:  # MADDAbc
         bc = sp & 3
         return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])+vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp <= 0x0F:  # MSUBAbc
         bc = sp & 3
         return f"{{ float b=vuNorm(vf[{ft}][{bc}]); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])-vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if 0x18 <= sp <= 0x1B:  # MULAbc
         bc = sp & 3
@@ -307,7 +306,7 @@ def emit_upper(hi: int) -> str:
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x21:  # MADDAq
         return f"{{ float b=vuNorm(q); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])+vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x22:  # ADDAi
         return f"{{ float b=vuNorm(regI); float r[4]; " + \
@@ -315,7 +314,7 @@ def emit_upper(hi: int) -> str:
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x23:  # MADDAi
         return f"{{ float b=vuNorm(regI); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])+vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x24:  # SUBAq
         return f"{{ float b=vuNorm(q); float r[4]; " + \
@@ -323,7 +322,7 @@ def emit_upper(hi: int) -> str:
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x25:  # MSUBAq
         return f"{{ float b=vuNorm(q); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])-vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x26:  # SUBAi
         return f"{{ float b=vuNorm(regI); float r[4]; " + \
@@ -331,7 +330,7 @@ def emit_upper(hi: int) -> str:
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x27:  # MSUBAi
         return f"{{ float b=vuNorm(regI); float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])-vuNorm(vf[{fs}][{c}])*b);" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],b);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x28:  # ADDA
         return f"{{ float r[4]; " + \
@@ -339,7 +338,7 @@ def emit_upper(hi: int) -> str:
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x29:  # MADDA
         return f"{{ float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])+vuNorm(vf[{fs}][{c}])*vuNorm(vf[{ft}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMadd(acc[{c}],vf[{fs}][{c}],vf[{ft}][{c}]);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x2A:  # MULA
         return f"{{ float r[4]; " + \
@@ -351,7 +350,7 @@ def emit_upper(hi: int) -> str:
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x2D:  # MSUBA
         return f"{{ float r[4]; " + \
-               " ".join(f"r[{c}]=vuNormRes(vuNorm(acc[{c}])-vuNorm(vf[{fs}][{c}])*vuNorm(vf[{ft}][{c}]));" for c in range(4) if dest & (8 >> c)) + \
+               " ".join(f"r[{c}]=vuMsub(acc[{c}],vf[{fs}][{c}],vf[{ft}][{c}]);" for c in range(4) if dest & (8 >> c)) + \
                " " + emit_dest("acc", [f"r[{c}]" for c in range(4)], dest) + " }"
     if sp == 0x2E:  # OPMULA
         return f"{{ float r[4]={{vuNormRes(vuNorm(vf[{fs}][1])*vuNorm(vf[{ft}][2])), vuNormRes(vuNorm(vf[{fs}][2])*vuNorm(vf[{ft}][0])), vuNormRes(vuNorm(vf[{fs}][0])*vuNorm(vf[{ft}][1])), 0.0f}}; " + \
@@ -486,16 +485,16 @@ def emit_lower_nonbranch(lo: int) -> str:
             if f2 == 0x38:  # DIV
                 fsf = (lo >> 21) & 3
                 ftf = (lo >> 23) & 3
-                return f"vuQueueQ(qPipe, q, status, vuDiv(vf[{fs}][{fsf}], vf[{ft}][{ftf}], qPipe.di), 7);"
+                return f"{{ uint32_t _di=0; float _qv=vuDiv(vf[{fs}][{fsf}], vf[{ft}][{ftf}], _di); vuQueueQ(qPipe, _qv, _di, 7); }}"
             if f2 == 0x39:  # SQRT
                 ftf = (lo >> 23) & 3
-                return f"vuQueueQ(qPipe, q, status, vuSqrt(vf[{ft}][{ftf}], qPipe.di), 7);"
+                return f"{{ uint32_t _di=0; float _qv=vuSqrt(vf[{ft}][{ftf}], _di); vuQueueQ(qPipe, _qv, _di, 7); }}"
             if f2 == 0x3A:  # RSQRT
                 fsf = (lo >> 21) & 3
                 ftf = (lo >> 23) & 3
-                return f"vuQueueQ(qPipe, q, status, vuRsqrt(vf[{fs}][{fsf}], vf[{ft}][{ftf}], qPipe.di), 13);"
+                return f"{{ uint32_t _di=0; float _qv=vuRsqrt(vf[{fs}][{fsf}], vf[{ft}][{ftf}], _di); vuQueueQ(qPipe, _qv, _di, 13); }}"
             if f2 == 0x3B:  # WAITQ
-                return "vuFlushQ(qPipe, q, status);"
+                return ""  # Handled before upper op in emit_pair_body (stall before pair issue)
             if f2 == 0x3C:  # MTIR
                 if vit == 0:
                     return ""
@@ -546,6 +545,16 @@ def branch_info(lo: int, hi: int, pc: int, code_size: int):
     return (top, vis, vit, target)
 
 
+def lower_stalls_on_q(lo: int, hi: int) -> bool:
+    if (hi & 0x80000000) or lo == 0 or lo == 0x8000033C:
+        return False
+    top = (lo >> 25) & 0x7F
+    if top == 0x40 and (lo & 0x3F) >= 0x3C:
+        f2 = (lo & 3) | ((lo >> 4) & 0x7C)
+        return f2 in (0x38, 0x39, 0x3A, 0x3B)  # DIV, SQRT, RSQRT, WAITQ
+    return False
+
+
 def emit_pair_body(lo: int, hi: int, is_delay_slot: bool = False) -> str:
     """Emit execution of one non-branch (or delay-slot) VU1 pair, updating clipPipe and bVi."""
     u_code = emit_upper(hi)
@@ -561,6 +570,8 @@ def emit_pair_body(lo: int, hi: int, is_delay_slot: bool = False) -> str:
     vi_w = lower_writes_vi_delay(lo, hi)
 
     parts = []
+    if lower_stalls_on_q(lo, hi):
+        parts.append("vuWaitQ(qPipe, clipPipe, clip, q, status);")
     if vi_w != 0:
         parts.append(f"int32_t _oldVi = vi[{vi_w}];")
     if shadow:
@@ -728,6 +739,16 @@ inline float vuNormRes(float v) noexcept
     return vuNorm(v);
 }
 
+inline float vuMadd(float a, float b, float c) noexcept
+{
+    return vuNormRes(static_cast<float>(static_cast<double>(vuNorm(a)) + static_cast<double>(vuNorm(b)) * static_cast<double>(vuNorm(c))));
+}
+
+inline float vuMsub(float a, float b, float c) noexcept
+{
+    return vuNormRes(static_cast<float>(static_cast<double>(vuNorm(a)) - static_cast<double>(vuNorm(b)) * static_cast<double>(vuNorm(c))));
+}
+
 inline float vuMinMax(float a, float b, bool maximum) noexcept
 {
     int32_t l, r;
@@ -821,14 +842,10 @@ struct VuQPipe
     uint8_t delay = 0;
 };
 
-inline void vuQueueQ(VuQPipe &qp, float &q, uint32_t &status, float val, uint8_t delay) noexcept
+inline void vuQueueQ(VuQPipe &qp, float val, uint32_t di, uint8_t delay) noexcept
 {
-    if (qp.delay)
-    {
-        q = qp.val;
-        status = (status & 0xFCFu) | qp.di | (qp.di << 6);
-    }
     qp.val = val;
+    qp.di = di;
     qp.delay = delay;
 }
 
@@ -838,6 +855,19 @@ inline void vuTickQ(VuQPipe &qp, float &q, uint32_t &status) noexcept
     {
         q = qp.val;
         status = (status & 0xFCFu) | qp.di | (qp.di << 6);
+    }
+}
+
+inline void vuWaitQ(VuQPipe &qp, VuClipPipe &cp, uint32_t &clip, float &q, uint32_t &status) noexcept
+{
+    if (qp.delay)
+    {
+        uint8_t d = qp.delay;
+        while (d-- && cp.pending)
+            vuTickClip(cp, clip);
+        q = qp.val;
+        status = (status & 0xFCFu) | qp.di | (qp.di << 6);
+        qp.delay = 0;
     }
 }
 
