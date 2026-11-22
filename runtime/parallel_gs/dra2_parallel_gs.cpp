@@ -388,9 +388,9 @@ public:
             std::memcpy(&p.bgcolor, &priv.bgcolor, 8);
             ParallelGS::VSyncInfo info{};
             info.phase = m_stats.latches & 1;
-            info.dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            info.dst_stage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-            info.dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+            info.dst_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            info.dst_stage = VK_PIPELINE_STAGE_2_COPY_BIT;
+            info.dst_access = VK_ACCESS_2_TRANSFER_READ_BIT;
             info.force_progressive = true;
             info.anti_blur = true;
             info.adapt_to_internal_horizontal_resolution = true;
@@ -476,10 +476,6 @@ public:
             }
         }
         auto cmd = m_device.request_command_buffer();
-        cmd->image_barrier(image, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
-                           VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
         cmd->copy_image_to_buffer(*slot.buffer, image, 0, {}, {w, h, 1}, 0, 0,
                                   {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
         cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
