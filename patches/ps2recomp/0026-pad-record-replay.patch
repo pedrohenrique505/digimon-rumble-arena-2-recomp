@@ -1,0 +1,71 @@
+diff --git i/ps2xRuntime/src/lib/ps2_pad.cpp w/ps2xRuntime/src/lib/ps2_pad.cpp
+index 8590f14..36319d1 100644
+--- i/ps2xRuntime/src/lib/ps2_pad.cpp
++++ w/ps2xRuntime/src/lib/ps2_pad.cpp
+@@ -1,6 +1,10 @@
+ #include "runtime/ps2_pad.h"
+ #include "ps2_host_backend.h"
+ #include <cstring>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <vector>
+ 
+ namespace
+ {
+@@ -23,6 +27,47 @@ namespace
+     constexpr uint16_t PAD_L1 = 0x0400u;
+     constexpr uint16_t PAD_R2 = 0x0200u;
+     constexpr uint16_t PAD_L2 = 0x0100u;
++
++    struct PadTrace {
++        struct Event { double time; unsigned buttons, rx, ry, lx, ly; };
++        std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
++        FILE *out = nullptr;
++        std::vector<Event> events;
++        size_t next = 0;
++        unsigned last[5] = { 65536, 0, 0, 0, 0 };
++        bool replay = false;
++        PadTrace() {
++            if (const char *path = std::getenv("DRA2_PAD_REPLAY")) {
++                replay = true;
++                FILE *f = std::fopen(path, "r");
++                if (!f) { std::perror("DRA2_PAD_REPLAY"); std::abort(); }
++                Event e;
++                while (std::fscanf(f, "%lf %u %u %u %u %u", &e.time, &e.buttons, &e.rx, &e.ry, &e.lx, &e.ly) == 6) events.push_back(e);
++                std::fclose(f);
++                if (events.empty()) { std::fprintf(stderr, "Empty pad replay\n"); std::abort(); }
++            } else if (const char *path = std::getenv("DRA2_PAD_RECORD")) {
++                out = std::fopen(path, "wx");
++                if (!out) { std::perror("DRA2_PAD_RECORD"); std::abort(); }
++            }
++        }
++        void apply(uint8_t *data) {
++            if (!replay && !out) return;
++            double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
++            if (replay) {
++                while (next + 1 < events.size() && events[next + 1].time <= t) ++next;
++                const auto &e = events[next];
++                data[2] = e.buttons & 255; data[3] = e.buttons >> 8;
++                data[4] = e.rx; data[5] = e.ry; data[6] = e.lx; data[7] = e.ly;
++            } else if (out) {
++                unsigned now[] = { unsigned(data[2]) | (unsigned(data[3]) << 8), data[4], data[5], data[6], data[7] };
++                if (std::memcmp(now, last, sizeof(now)) != 0) {
++                    std::fprintf(out, "%.6f %u %u %u %u %u\n", t, now[0], now[1], now[2], now[3], now[4]);
++                    std::fflush(out);
++                    std::memcpy(last, now, sizeof(now));
++                }
++            }
++        }
++    };
+ }
+ 
+ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t size)
+@@ -121,5 +166,7 @@ bool PSPadBackend::readState(int /*port*/, int /*slot*/, uint8_t *data, size_t s
+ 
+     data[2] = static_cast<uint8_t>(btns & 0xFF);
+     data[3] = static_cast<uint8_t>(btns >> 8);
++    static PadTrace trace;
++    trace.apply(data);
+     return true;
+ }
