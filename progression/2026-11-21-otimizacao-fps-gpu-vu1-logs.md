@@ -51,6 +51,7 @@ inspeção estática com Ghidra MCP e `readelf`.
 | + VU1 sem TLS no loop quente, `NOP` upper/lower inline | `587ba69` | 17,81 FPS | **58,56 FPS** | **18,70–18,84 FPS** (`[20–35 s]`) | Patch 0029 (~3,7× o baseline) |
 | + Silenciamento `ps2_log.txt` + `AGRESSIVE_LOGS=OFF` | `d431180` | **60,08 FPS** | — | **26,13–26,19 FPS** (`[10–20 s]`) | `ps2_log.txt` não criado (~5,15× o baseline); **0 erros `Unexpected Z format`**; boot 3,4× mais rápido fez o roteiro avançar até uma cena 3D ainda mais pesada em `[25–35 s]` (~11,5 FPS) |
 | ~~+ VU1 SSE inline (`0030`)~~ *(revertido em `f6e3d20`)* | `92397d8` → `f6e3d20` | — | — | *(descartado)* | Introduziu corrupção visual no menu e 15–26 `[ERROR]: Unexpected Z format` (SSE `_mm_min_ps`/`_mm_max_ps` sem normalização de entrada `Inf`/`NaN` e `MXCSR` compartilhado); revertido integralmente. |
+| + **Etapa 4: VU1 AOT (`tools/vu1_transpile.py` + patch `0030`)** | `d0c83ce`, `297e887`, `d47b680` | **61,89 FPS** | **121–125 FPS** (`[15–25 s]`) | **59,97 FPS** (`[30–35 s]`, menu carrossel 3D) | VU1 caiu de **~90% → 1,7%** da CPU (`0,151 s` em `9,02 s`); `dra2-vu-replay` **100% bit-a-bit** (16 snapshots + 5 casos de clipping do menu); **0** `Unexpected Z format`, **0** erros Granite, **~28% de folga em VBlank** a 60 FPS no menu. |
 
 ## Documentação do fluxo
 
@@ -60,11 +61,13 @@ em [docs/desempenho.md](../docs/desempenho.md).
 
 ## Próximos passos
 
-1. **Etapa 4 do roadmap (VU1)**: o interpretador já foi acelerado **5,15×** na
-   cena 3D de 5 FPS (5,09 → 26,19 FPS) sem regressão visual nem erros de GS.
-   Nas amostras REA/GDB atuais, `VU1Interpreter` ainda representa ~90% do tempo
-   na cena mais pesada (~11,5 FPS). O próximo salto estrutural é compilar/traduzir
-   o microprograma quente (`pc=0x50`) para código nativo com validação diferencial
-   bit a bit contra o interpretador (sem atalhos que alterem semântica `Inf`/`NaN`).
-2. **Rebuild limpo de `dra2_generated` com `PS2X_ENABLE_AGRESSIVE_LOGS=OFF`**
+1. **Testar cenas de batalha 3D** (4 Digimons + arena + efeitos) para verificar
+   se há novos hashes de microprograma VU1 (`.DVP.overlay*`) a incluir no
+   `tools/vu1_transpile.py` e medir se os 60 FPS se mantêm em combate.
+2. **Reduzir overhead do emulador IOP (`advanceIopEeCycles`)**: no menu a
+   59,97 FPS (`[25–35 s]`), `iop` ainda consome **31,4%** do tempo (`2,835 s` de
+   CPU em `9,02 s`, com **1,28 milhão de chamadas**); agrupar/batching de ciclos
+   IOP em `EeScheduler::accountCycles()` pode liberar ~25–30% de CPU extra para
+   arenas mais pesadas.
+3. **Rebuild limpo de `dra2_generated` com `PS2X_ENABLE_AGRESSIVE_LOGS=OFF`**
    quando for conveniente (elimina até o resíduo inline de `log_stream()`).
