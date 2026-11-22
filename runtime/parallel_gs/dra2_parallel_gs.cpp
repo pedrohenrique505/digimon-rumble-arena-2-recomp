@@ -339,78 +339,109 @@ public:
 
     void onLatch() override
     {
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
-        if (!ensureInit())
-            return;
-        const GSRegisters &priv = m_runtime.memory().gs();
-        auto &p = m_gpu.get_priv_register_state();
-        std::memcpy(&p.smode1, &priv.smode1, 8);
-        std::memcpy(&p.pmode, &priv.pmode, 8);
-        std::memcpy(&p.smode2, &priv.smode2, 8);
-        std::memcpy(&p.dispfb1, &priv.dispfb1, 8);
-        std::memcpy(&p.display1, &priv.display1, 8);
-        std::memcpy(&p.dispfb2, &priv.dispfb2, 8);
-        std::memcpy(&p.display2, &priv.display2, 8);
-        std::memcpy(&p.bgcolor, &priv.bgcolor, 8);
-        ParallelGS::VSyncInfo info{};
-        info.phase = m_stats.latches & 1;
-        info.dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        info.dst_stage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
-        info.dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-        info.force_progressive = true;
-        info.anti_blur = true;
-        info.adapt_to_internal_horizontal_resolution = true;
-        auto scanout = m_gpu.vsync(info);
-        if (scanout.image)
+        bool submitted = false;
+        size_t consumeSlot = kReadbackSlots;
         {
-            if (++m_stats.scanoutImages == 1)
-                std::fprintf(stderr, "[dra2-gs] primeiro scanout %ux%u smode1=0x%llx\n",
-                             scanout.image->get_width(), scanout.image->get_height(),
-                             (unsigned long long)priv.smode1);
-            if (m_present)
-                readbackScanout(scanout);
+            std::lock_guard<std::recursive_mutex> lock(m_mutex);
+            if (!ensureInit())
+                return;
+            const GSRegisters &priv = m_runtime.memory().gs();
+            auto &p = m_gpu.get_priv_register_state();
+            std::memcpy(&p.smode1, &priv.smode1, 8);
+            std::memcpy(&p.pmode, &priv.pmode, 8);
+            std::memcpy(&p.smode2, &priv.smode2, 8);
+            std::memcpy(&p.dispfb1, &priv.dispfb1, 8);
+            std::memcpy(&p.display1, &priv.display1, 8);
+            std::memcpy(&p.dispfb2, &priv.dispfb2, 8);
+            std::memcpy(&p.display2, &priv.display2, 8);
+            std::memcpy(&p.bgcolor, &priv.bgcolor, 8);
+            ParallelGS::VSyncInfo info{};
+            info.phase = m_stats.latches & 1;
+            info.dst_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            info.dst_stage = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            info.dst_access = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+            info.force_progressive = true;
+            info.anti_blur = true;
+            info.adapt_to_internal_horizontal_resolution = true;
+            auto scanout = m_gpu.vsync(info);
+            if (scanout.image)
+            {
+                if (++m_stats.scanoutImages == 1)
+                    std::fprintf(stderr, "[dra2-gs] primeiro scanout %ux%u smode1=0x%llx\n",
+                                 scanout.image->get_width(), scanout.image->get_height(),
+                                 (unsigned long long)priv.smode1);
+                if (m_present)
+                {
+                    submitted = enqueueReadbackUnlocked(scanout);
+                    if (submitted)
+                    {
+                        const size_t prevSlot = (m_readbackWriteIdx + kReadbackSlots - 1) % kReadbackSlots;
+                        const size_t olderSlot = m_readbackWriteIdx;
+                        if (m_readbackRing[olderSlot].pending)
+                            consumeSlot = olderSlot;
+                        else if (m_stats.presentedFrames == 0 && m_readbackRing[prevSlot].pending)
+                            consumeSlot = prevSlot;
+                    }
+                }
+            }
+            else
+                m_stats.emptyScanouts++;
+            m_gpu.flush();
+            m_device.next_frame_context();
+            m_stats.latches++;
+            if (m_stats.latches % 300 == 0)
+                std::fprintf(stderr,
+                             "[dra2-gs] shadow latches=%llu gif=%llu nativeFallbacks=%llu fifoReq=%llu fifoBytes=%llu scanoutImages=%llu emptyScanouts=%llu presented=%llu readbackFailures=%llu\n",
+                             (unsigned long long)m_stats.latches, (unsigned long long)m_stats.gifPackets,
+                             (unsigned long long)m_stats.nativeFallbacks, (unsigned long long)m_stats.fifoRequests,
+                             (unsigned long long)m_stats.fifoBytes,
+                             (unsigned long long)m_stats.scanoutImages, (unsigned long long)m_stats.emptyScanouts,
+                             (unsigned long long)m_stats.presentedFrames, (unsigned long long)m_stats.readbackFailures);
         }
-        else
-            m_stats.emptyScanouts++;
-        m_gpu.flush();
-        m_device.next_frame_context();
-        m_stats.latches++;
-        if (m_stats.latches % 300 == 0)
-            std::fprintf(stderr,
-                         "[dra2-gs] shadow latches=%llu gif=%llu nativeFallbacks=%llu fifoReq=%llu fifoBytes=%llu scanoutImages=%llu emptyScanouts=%llu presented=%llu readbackFailures=%llu\n",
-                         (unsigned long long)m_stats.latches, (unsigned long long)m_stats.gifPackets,
-                         (unsigned long long)m_stats.nativeFallbacks, (unsigned long long)m_stats.fifoRequests,
-                         (unsigned long long)m_stats.fifoBytes,
-                         (unsigned long long)m_stats.scanoutImages, (unsigned long long)m_stats.emptyScanouts,
-                         (unsigned long long)m_stats.presentedFrames, (unsigned long long)m_stats.readbackFailures);
+        // Espera da fence, downsample e publicação rodam fora de m_mutex para
+        // não travar a GameThread durante o readback do scanout.
+        if (consumeSlot < kReadbackSlots)
+            finishReadback(consumeSlot);
     }
 
-    // Readback síncrono do scanout para a janela (raylib/OpenGL não compartilha
-    // a imagem Vulkan). Um buffer de staging persistente é realocado só quando
-    // o tamanho muda. Falha/formato inesperado mantém o quadro anterior vazio
-    // e o runtime cai para a apresentação CPU.
-    void readbackScanout(const ParallelGS::ScanoutResult &scanout)
+    struct ReadbackSlot
+    {
+        Vulkan::BufferHandle buffer;
+        Vulkan::Fence fence;
+        size_t bytes = 0;
+        uint32_t width = 0, height = 0, internalWidth = 0;
+        bool pending = false;
+    };
+
+    bool enqueueReadbackUnlocked(const ParallelGS::ScanoutResult &scanout)
     {
         const auto &image = *scanout.image;
         if (image.get_format() != VK_FORMAT_R8G8B8A8_UNORM)
         {
             m_stats.readbackFailures++;
-            return;
+            return false;
+        }
+        auto &slot = m_readbackRing[m_readbackWriteIdx];
+        if (slot.pending && slot.fence)
+        {
+            slot.fence->wait();
+            slot.fence.reset();
+            slot.pending = false;
         }
         const uint32_t w = image.get_width(), h = image.get_height();
         const size_t bytes = static_cast<size_t>(w) * h * 4;
-        if (!m_readbackBuffer || m_readbackBytes != bytes)
+        if (!slot.buffer || slot.bytes != bytes)
         {
             Vulkan::BufferCreateInfo bufferInfo{};
             bufferInfo.size = bytes;
             bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
             bufferInfo.domain = Vulkan::BufferDomain::CachedHost;
-            m_readbackBuffer = m_device.create_buffer(bufferInfo);
-            m_readbackBytes = bytes;
-            if (!m_readbackBuffer)
+            slot.buffer = m_device.create_buffer(bufferInfo);
+            slot.bytes = bytes;
+            if (!slot.buffer)
             {
                 m_stats.readbackFailures++;
-                return;
+                return false;
             }
         }
         auto cmd = m_device.request_command_buffer();
@@ -418,61 +449,119 @@ public:
                            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
                            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
-        cmd->copy_image_to_buffer(*m_readbackBuffer, image, 0, {}, {w, h, 1}, 0, 0,
+        cmd->copy_image_to_buffer(*slot.buffer, image, 0, {}, {w, h, 1}, 0, 0,
                                   {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1});
         cmd->barrier(VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                      VK_PIPELINE_STAGE_2_HOST_BIT, VK_ACCESS_2_HOST_READ_BIT);
-        m_device.submit(cmd);
-        m_device.wait_idle();
+        m_device.submit(cmd, &slot.fence);
+        slot.width = w;
+        slot.height = h;
+        slot.internalWidth = scanout.internal_width;
+        slot.pending = true;
+        m_readbackWriteIdx = (m_readbackWriteIdx + 1) % kReadbackSlots;
+        return true;
+    }
+
+    void finishReadback(size_t slotIdx)
+    {
+        auto &slot = m_readbackRing[slotIdx];
+        if (!slot.pending || !slot.buffer)
+            return;
+        if (slot.fence)
+        {
+            slot.fence->wait();
+            slot.fence.reset();
+        }
+        slot.pending = false;
+
         const auto *rgba = static_cast<const uint8_t *>(
-            m_device.map_host_buffer(*m_readbackBuffer, Vulkan::MEMORY_ACCESS_READ_BIT));
+            m_device.map_host_buffer(*slot.buffer, Vulkan::MEMORY_ACCESS_READ_BIT));
         if (!rgba)
         {
             m_stats.readbackFailures++;
             return;
         }
-        // O scanout pode vir em supersample horizontal (ex.: 2560 para uma
-        // largura interna de 640). Reduz por média de caixa pelo fator
-        // inteiro até a largura interna antes de entregar à janela 640px.
-        const uint32_t targetW = (scanout.internal_width && scanout.internal_width < w)
-                                     ? scanout.internal_width : w;
+        const uint32_t w = slot.width, h = slot.height;
+        const uint32_t targetW = (slot.internalWidth && slot.internalWidth < w)
+                                     ? slot.internalWidth : w;
+        const bool isFirst = (m_stats.presentedFrames == 0);
+        uint64_t rgbSum = 0;
+        uint32_t outW = w;
         if (targetW < w && targetW && w % targetW == 0)
         {
             const uint32_t factor = w / targetW;
-            m_presentFrame.assign(static_cast<size_t>(targetW) * h * 4, 0);
-            for (uint32_t y = 0; y < h; y++)
-                for (uint32_t x = 0; x < targetW; x++)
-                    for (unsigned ch = 0; ch < 4; ch++)
+            m_presentScratch.resize(static_cast<size_t>(targetW) * h * 4);
+            if (factor == 4)
+            {
+                for (uint32_t y = 0; y < h; y++)
+                {
+                    const uint8_t *src = rgba + static_cast<size_t>(y) * w * 4;
+                    uint8_t *dst = m_presentScratch.data() + static_cast<size_t>(y) * targetW * 4;
+                    for (uint32_t x = 0; x < targetW; x++)
                     {
-                        uint32_t sum = 0;
-                        for (uint32_t k = 0; k < factor; k++)
-                            sum += rgba[(static_cast<size_t>(y) * w + x * factor + k) * 4 + ch];
-                        m_presentFrame[(static_cast<size_t>(y) * targetW + x) * 4 + ch] =
-                            static_cast<uint8_t>(sum / factor);
+                        const uint8_t *p = src + x * 16;
+                        const uint8_t r = static_cast<uint8_t>((uint32_t(p[0]) + p[4] + p[8] + p[12]) >> 2);
+                        const uint8_t g = static_cast<uint8_t>((uint32_t(p[1]) + p[5] + p[9] + p[13]) >> 2);
+                        const uint8_t b = static_cast<uint8_t>((uint32_t(p[2]) + p[6] + p[10] + p[14]) >> 2);
+                        dst[x * 4 + 0] = r;
+                        dst[x * 4 + 1] = g;
+                        dst[x * 4 + 2] = b;
+                        dst[x * 4 + 3] = 0xff;
                     }
-            m_presentWidth = targetW;
+                }
+            }
+            else
+            {
+                for (uint32_t y = 0; y < h; y++)
+                    for (uint32_t x = 0; x < targetW; x++)
+                    {
+                        uint32_t r = 0, g = 0, b = 0;
+                        const uint8_t *p = rgba + (static_cast<size_t>(y) * w + x * factor) * 4;
+                        for (uint32_t k = 0; k < factor; k++)
+                        {
+                            r += p[k * 4 + 0];
+                            g += p[k * 4 + 1];
+                            b += p[k * 4 + 2];
+                        }
+                        uint8_t *dst = m_presentScratch.data() + (static_cast<size_t>(y) * targetW + x) * 4;
+                        dst[0] = static_cast<uint8_t>(r / factor);
+                        dst[1] = static_cast<uint8_t>(g / factor);
+                        dst[2] = static_cast<uint8_t>(b / factor);
+                        dst[3] = 0xff;
+                    }
+            }
+            outW = targetW;
         }
         else
         {
-            m_presentFrame.assign(rgba, rgba + bytes);
-            m_presentWidth = w;
+            m_presentScratch.resize(slot.bytes);
+            for (size_t i = 0; i + 3 < slot.bytes; i += 4)
+            {
+                m_presentScratch[i + 0] = rgba[i + 0];
+                m_presentScratch[i + 1] = rgba[i + 1];
+                m_presentScratch[i + 2] = rgba[i + 2];
+                m_presentScratch[i + 3] = 0xff;
+            }
+            outW = w;
         }
-        // O scanout pode trazer alfa zero; a textura da janela modula por
-        // alfa e o quadro sumiria. Apresentação é opaca.
-        uint64_t rgbSum = 0;
-        for (size_t i = 0; i + 3 < m_presentFrame.size(); i += 4)
+        m_device.unmap_host_buffer(*slot.buffer, Vulkan::MEMORY_ACCESS_READ_BIT);
+
+        if (isFirst)
         {
-            rgbSum += m_presentFrame[i] + m_presentFrame[i + 1] + m_presentFrame[i + 2];
-            m_presentFrame[i + 3] = 0xff;
-        }
-        m_device.unmap_host_buffer(*m_readbackBuffer, Vulkan::MEMORY_ACCESS_READ_BIT);
-        m_presentHeight = h;
-        if (m_stats.presentedFrames == 0)
+            for (size_t i = 0; i + 3 < m_presentScratch.size(); i += 4)
+                rgbSum += m_presentScratch[i] + m_presentScratch[i + 1] + m_presentScratch[i + 2];
             std::fprintf(stderr, "[dra2-gs] brilho médio do primeiro quadro GPU: %llu\n",
-                         (unsigned long long)(m_presentFrame.empty() ? 0
-                            : rgbSum / (m_presentFrame.size() / 4 * 3)));
-        if (++m_stats.presentedFrames == 1)
+                         (unsigned long long)(m_presentScratch.empty() ? 0
+                            : rgbSum / (m_presentScratch.size() / 4 * 3)));
             std::fprintf(stderr, "[dra2-gs] primeiro quadro GPU apresentado %ux%u\n", w, h);
+        }
+        {
+            std::lock_guard<std::mutex> plock(m_presentMutex);
+            m_presentFrame.swap(m_presentScratch);
+            m_presentWidth = outW;
+            m_presentHeight = h;
+        }
+        m_stats.presentedFrames++;
     }
 
     bool skipCpuRaster() const override { return m_present; }
@@ -480,7 +569,7 @@ public:
     bool copyPresentationFrame(std::vector<uint8_t> &outPixels, uint32_t &outWidth,
                                uint32_t &outHeight) override
     {
-        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> plock(m_presentMutex);
         if (!m_present || m_presentFrame.empty() || !m_presentWidth || !m_presentHeight)
             return false;
         outPixels = m_presentFrame;
@@ -492,12 +581,15 @@ public:
     struct Stats { uint64_t gifPackets = 0, nativeFallbacks = 0, fifoRequests = 0, fifoBytes = 0, latches = 0, scanoutImages = 0, emptyScanouts = 0, presentedFrames = 0, readbackFailures = 0; } m_stats;
 
 private:
+    static constexpr size_t kReadbackSlots = 2;
     PS2Runtime &m_runtime;
     bool m_present = false;
+    std::mutex m_presentMutex;
     std::vector<uint8_t> m_presentFrame;
+    std::vector<uint8_t> m_presentScratch;
     uint32_t m_presentWidth = 0, m_presentHeight = 0;
-    Vulkan::BufferHandle m_readbackBuffer;
-    size_t m_readbackBytes = 0;
+    ReadbackSlot m_readbackRing[kReadbackSlots];
+    size_t m_readbackWriteIdx = 0;
     Vulkan::Context m_context;
     Vulkan::Device m_device;
     ParallelGS::GSInterface m_gpu;
