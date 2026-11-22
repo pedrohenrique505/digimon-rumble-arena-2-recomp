@@ -12,6 +12,7 @@
 #include "context.hpp"
 #include "device.hpp"
 #include "gs_interface.hpp"
+#include "thread_id.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -41,6 +42,15 @@ public:
 
     bool ensureInit()
     {
+        // Granite exige índice de thread registrado em toda thread que chama
+        // Vulkan::Device/GSInterface. m_mutex serializa GameThread e a thread
+        // de apresentação, então ambas compartilham o índice 0 com segurança.
+        static thread_local bool s_threadRegistered = false;
+        if (!s_threadRegistered)
+        {
+            Util::register_thread_index(0);
+            s_threadRegistered = true;
+        }
         if (m_ready)
             return true;
         if (m_failed)
