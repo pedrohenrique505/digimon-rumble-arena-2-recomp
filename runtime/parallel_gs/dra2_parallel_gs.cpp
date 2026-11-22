@@ -394,6 +394,8 @@ public:
             info.force_progressive = true;
             info.anti_blur = true;
             info.adapt_to_internal_horizontal_resolution = true;
+            // The scanout samples VRAM and requires pending GS work to be submitted.
+            m_gpu.flush();
             auto scanout = m_gpu.vsync(info);
             if (scanout.image)
             {
@@ -417,7 +419,6 @@ public:
             }
             else
                 m_stats.emptyScanouts++;
-            m_gpu.flush();
             m_device.next_frame_context();
             m_stats.latches++;
             if (m_stats.latches % 300 == 0)
