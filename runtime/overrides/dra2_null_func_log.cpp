@@ -25,15 +25,47 @@ namespace ps2_log
         return enabled;
     }
 
+    inline int &depth()
+    {
+        static thread_local int d = 0;
+        return d;
+    }
+
     std::ostream &log_stream()
     {
         if (!funcLogEnabled())
         {
+            // Mantém depth() em 0 para que loops inline `for (i < depth()) log_stream() << '\t'`
+            // em libdra2_generated.a executem 0 iterações (e nunca acumulem se log_entry/exit
+            // misturarem chamadas inline e out-of-line).
+            depth() = 0;
             static std::ostream nullStream(nullptr);
             return nullStream;
         }
         static std::ofstream f((std::filesystem::current_path() / "ps2_log.txt").string(), std::ios::out);
         return f.is_open() ? static_cast<std::ostream &>(f) : std::cerr;
+    }
+
+    void log_entry(const char *name)
+    {
+        if (!funcLogEnabled())
+            return;
+        for (int i = 0; i < depth(); ++i)
+            log_stream() << '\t';
+        log_stream() << ">> " << name << " enter\n";
+        log_stream().flush();
+        depth()++;
+    }
+
+    void log_exit(const char *name)
+    {
+        if (!funcLogEnabled())
+            return;
+        depth()--;
+        for (int i = 0; i < depth(); ++i)
+            log_stream() << '\t';
+        log_stream() << "<< " << name << " exit\n";
+        log_stream().flush();
     }
 } // namespace ps2_log
 
