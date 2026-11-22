@@ -13,6 +13,7 @@
 #include "device.hpp"
 #include "gs_interface.hpp"
 #include "thread_id.hpp"
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -584,6 +585,23 @@ public:
                          (unsigned long long)(m_presentScratch.empty() ? 0
                             : rgbSum / (m_presentScratch.size() / 4 * 3)));
             std::fprintf(stderr, "[dra2-gs] primeiro quadro GPU apresentado %ux%u\n", w, h);
+        }
+        static const bool traceFrames = std::getenv("DRA2_TRACE_SCANOUT") != nullptr;
+        if (traceFrames)
+        {
+            // Hash the pixels published to the window, after downsampling.
+            uint64_t hash = 14695981039346656037ull;
+            for (size_t i = 0; i < m_presentScratch.size(); ++i)
+            {
+                hash ^= m_presentScratch[i];
+                hash *= 1099511628211ull;
+            }
+            const auto now = std::chrono::steady_clock::now().time_since_epoch();
+            const auto us = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
+            std::fprintf(stderr, "[dra2-scanout] us=%lld frame=%llu size=%ux%u hash=%016llx\n",
+                         static_cast<long long>(us),
+                         static_cast<unsigned long long>(m_stats.presentedFrames),
+                         outW, h, static_cast<unsigned long long>(hash));
         }
         {
             std::lock_guard<std::mutex> plock(m_presentMutex);
