@@ -1,0 +1,29 @@
+diff --git a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+--- a/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ b/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -1649,12 +1989,24 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         uint64_t readyCycle = calculatePairReadyCycle(decoded);
+         while (readyCycle > m_cycle)
+         {
++            // Any stall advances at least one cycle before this pair issues,
++            // so a 1-cycle IALU write from the previous pair has already
++            // committed and is no longer shadowed for branch reads.
++            m_viBranchBackupValid = false;
+             if (readyCycle >= budgetEnd)
+             {
+                 advanceTo(budgetEnd);
+                 break;
+             }
+-            advanceTo(readyCycle);
++            if (!m_xgkick.active && !hasAnyPending())
++            {
++                m_cycle = readyCycle;
++                m_state.cycles = m_cycle;
++            }
++            else
++            {
++                advanceTo(readyCycle);
++            }
+             readyCycle = calculatePairReadyCycle(decoded);
+         }
+         if (m_cycle >= budgetEnd)

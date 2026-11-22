@@ -87,6 +87,22 @@ def lower_reads_vf(lo: int, hi: int, reg: int) -> bool:
     return False
 
 
+def lower_writes_vi_lsu(lo: int, hi: int) -> int:
+    """Return VI register written by 4-cycle LSU load (ILW/ILWR), else 0."""
+    if (hi & 0x80000000) or lo == 0 or lo == 0x8000033C:
+        return 0
+    top = (lo >> 25) & 0x7F
+    if top == 0x04:  # ILW
+        return (lo >> 16) & 0xF
+    if top == 0x40:
+        funct = lo & 0x3F
+        if funct >= 0x3C:
+            f2 = (lo & 3) | ((lo >> 4) & 0x7C)
+            if f2 == 0x3E:  # ILWR
+                return (lo >> 16) & 0xF
+    return 0
+
+
 def lower_writes_vi_delay(lo: int, hi: int) -> int:
     """Return VI register written by lower op (1..15) if it delays next branch read, else 0.
     Matches VU1Interpreter::decodeLowerUsage (delaysNextBranchRead): only IALU, LQI/LQD, SQI/SQD, MTIR."""
@@ -568,10 +584,11 @@ def emit_pair_body(lo: int, hi: int, is_delay_slot: bool = False) -> str:
     u_wr = upper_written_vf(hi)
     shadow = u_wr != 0 and lower_reads_vf(lo, hi, u_wr)
     vi_w = lower_writes_vi_delay(lo, hi)
+    vi_lsu = lower_writes_vi_lsu(lo, hi)
 
     parts = []
     if lower_stalls_on_q(lo, hi):
-        parts.append("vuWaitQ(qPipe, clipPipe, clip, q, status);")
+        parts.append("if (qPipe.delay) { bViReg = 0; cyc += qPipe.delay; } vuWaitQ(qPipe, clipPipe, clip, q, status);")
     if vi_w != 0:
         parts.append(f"int32_t _oldVi = vi[{vi_w}];")
     if shadow:
@@ -588,11 +605,13 @@ def emit_pair_body(lo: int, hi: int, is_delay_slot: bool = False) -> str:
         if l_code:
             parts.append(l_code)
 
+    if vi_lsu != 0:
+        parts.append(f"viReady[{vi_lsu}] = cyc + 4u;")
     if vi_w != 0:
         parts.append(f"bViReg = {vi_w}; bViVal = _oldVi;")
     else:
         parts.append("bViReg = 0;")
-    parts.append("vuTickClip(clipPipe, clip); vuTickQ(qPipe, q, status);")
+    parts.append("++cyc; vuTickClip(clipPipe, clip); vuTickQ(qPipe, q, status);")
     return " ".join(parts)
 
 
@@ -610,9 +629,16 @@ def transpile_program(code: bytes, h: int) -> str:
     out.append("    uint32_t clip = st.clip, workingClip = st.clip, status = st.status;")
     out.append("    VuClipPipe clipPipe{}; VuQPipe qPipe{};")
     out.append("    uint8_t bViReg = 0; int32_t bViVal = 0;")
+    out.append("    uint32_t cyc = 0; uint32_t viReady[16] = {};")
     out.append("    const uint32_t dataMask = dataSize - 1u;")
     out.append("    uint32_t pc = st.pc & 0x3FFFu;")
     out.append("    auto readBVi = [&](uint8_t r) -> int16_t { return (int16_t)((r != 0 && bViReg == r) ? bViVal : vi[r]); };")
+    out.append("    auto stallVi = [&](uint8_t r1, uint8_t r2) {")
+    out.append("        uint32_t tgt = cyc;")
+    out.append("        if (r1 != 0 && viReady[r1] > tgt) tgt = viReady[r1];")
+    out.append("        if (r2 != 0 && viReady[r2] > tgt) tgt = viReady[r2];")
+    out.append("        if (tgt > cyc) { bViReg = 0; while (cyc < tgt) { ++cyc; vuTickClip(clipPipe, clip); vuTickQ(qPipe, q, status); } }")
+    out.append("    };")
     out.append("    goto dispatch;")
     out.append("dispatch:")
     out.append("    switch (pc) {")
@@ -658,6 +684,10 @@ def transpile_program(code: bytes, h: int) -> str:
             elif top == 0x2F:  # IBGEZ
                 cond = f"(readBVi({vis}) >= 0)"
 
+            if top in (0x24, 0x25, 0x2C, 0x2D, 0x2E, 0x2F):
+                out.append(f"    stallVi({vis}, 0);")
+            elif top in (0x28, 0x29):
+                out.append(f"    stallVi({vis}, {vit});")
             if indirect:
                 out.append(f"    uint32_t _tgt = ((uint32_t)(uint16_t)readBVi({vis}) * 8u) & 0x3FFFu;")
             out.append(f"    bool _taken = {cond};")
@@ -665,7 +695,7 @@ def transpile_program(code: bytes, h: int) -> str:
                 out.append(f"    {u_code}")
             if link_reg != 0:
                 out.append(f"    vi[{link_reg}] = (int32_t)((0x{pc:04x}u + 16u) / 8u);")
-            out.append("    bViReg = 0; vuTickClip(clipPipe, clip); vuTickQ(qPipe, q, status);")
+            out.append("    bViReg = 0; ++cyc; vuTickClip(clipPipe, clip); vuTickQ(qPipe, q, status);")
             if idx + 1 < n:
                 d_lo, d_hi = pairs[idx + 1]
                 d_ebit = bool(d_hi & 0x40000000)
