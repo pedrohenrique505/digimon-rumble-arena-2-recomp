@@ -9,7 +9,11 @@
 
 **Prioridade revisada após esta rodada:** medir o teto de ganho sem rasterização,
 provar a integração de um GS acelerado existente e atacar VU conforme o perfil.
-O roadmap vigente está em [NEXTSTEPS.md](../NEXTSTEPS.md). A redução local de
+O roadmap vigente está em [NEXTSTEPS.md](../NEXTSTEPS.md). O fluxo iterativo
+passo a passo adotado para investigar e eliminar gargalos reais de FPS (roteiro
+de controle, REA/GDB na janela lenta, Ghidra MCP, iteração sem invalidar a PCH
+e commits incrementais) está documentado em
+[docs/fluxo-otimizacao-fps.md](fluxo-otimizacao-fps.md). A redução local de
 trabalho em `WritePixel`/`SampleTexture` deixa de ser o próximo objetivo principal.
 As duas etapas concluídas acima são históricas; a numeração do novo roadmap
 identifica o trabalho estrutural ainda pendente.
