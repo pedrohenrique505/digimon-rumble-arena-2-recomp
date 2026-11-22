@@ -632,12 +632,12 @@ def transpile_program(code: bytes, h: int) -> str:
     out.append("    uint32_t cyc = 0; uint32_t viReady[16] = {};")
     out.append("    const uint32_t dataMask = dataSize - 1u;")
     out.append("    uint32_t pc = st.pc & 0x3FFFu;")
-    out.append("    auto readBVi = [&](uint8_t r) -> int16_t { return (int16_t)((r != 0 && bViReg == r) ? bViVal : vi[r]); };")
-    out.append("    auto stallVi = [&](uint8_t r1, uint8_t r2) {")
+    out.append("    auto readBVi = [&](uint8_t r) DRA2_ALWAYS_INLINE_ATTR -> int16_t { return (int16_t)((r != 0 && bViReg == r) ? bViVal : vi[r]); };")
+    out.append("    auto stallVi = [&](uint8_t r1, uint8_t r2) DRA2_ALWAYS_INLINE_ATTR {")
     out.append("        uint32_t tgt = cyc;")
     out.append("        if (r1 != 0 && viReady[r1] > tgt) tgt = viReady[r1];")
     out.append("        if (r2 != 0 && viReady[r2] > tgt) tgt = viReady[r2];")
-    out.append("        if (tgt > cyc) { bViReg = 0; while (cyc < tgt) { ++cyc; vuTickClip(clipPipe, clip); vuTickQ(qPipe, q, status); } }")
+    out.append("        if (__builtin_expect(tgt > cyc, 0)) { bViReg = 0; while (cyc < tgt) { ++cyc; vuTickClip(clipPipe, clip); vuTickQ(qPipe, q, status); } }")
     out.append("    };")
     out.append("    goto dispatch;")
     out.append("dispatch:")
@@ -752,34 +752,44 @@ void ps2_vu1_register_native_executor(Ps2Vu1NativeFn fn);
 
 namespace
 {
-inline float vuNorm(float v) noexcept
+#if defined(__GNUC__) || defined(__clang__)
+#define DRA2_ALWAYS_INLINE_ATTR __attribute__((always_inline))
+#define DRA2_ALWAYS_INLINE __attribute__((always_inline)) inline
+#define DRA2_NOINLINE __attribute__((noinline))
+#else
+#define DRA2_ALWAYS_INLINE_ATTR
+#define DRA2_ALWAYS_INLINE inline
+#define DRA2_NOINLINE
+#endif
+
+DRA2_ALWAYS_INLINE float vuNorm(float v) noexcept
 {
     uint32_t b;
     std::memcpy(&b, &v, 4);
-    const uint32_t exp = (b >> 23) & 0xFFu;
-    if (exp >= 1u && exp <= 254u)
+    const uint32_t absB = b & 0x7FFFFFFFu;
+    if (__builtin_expect((absB - 0x00800000u) < 0x7F000000u, 1))
         return v;
-    b = (exp == 0u) ? (b & 0x80000000u) : ((b & 0x80000000u) | 0x7F7FFFFFu);
+    b = (absB < 0x00800000u) ? (b & 0x80000000u) : ((b & 0x80000000u) | 0x7F7FFFFFu);
     std::memcpy(&v, &b, 4);
     return v;
 }
 
-inline float vuNormRes(float v) noexcept
+DRA2_ALWAYS_INLINE float vuNormRes(float v) noexcept
 {
     return vuNorm(v);
 }
 
-inline float vuMadd(float a, float b, float c) noexcept
+DRA2_ALWAYS_INLINE float vuMadd(float a, float b, float c) noexcept
 {
     return vuNormRes(static_cast<float>(static_cast<double>(vuNorm(a)) + static_cast<double>(vuNorm(b)) * static_cast<double>(vuNorm(c))));
 }
 
-inline float vuMsub(float a, float b, float c) noexcept
+DRA2_ALWAYS_INLINE float vuMsub(float a, float b, float c) noexcept
 {
     return vuNormRes(static_cast<float>(static_cast<double>(vuNorm(a)) - static_cast<double>(vuNorm(b)) * static_cast<double>(vuNorm(c))));
 }
 
-inline float vuMinMax(float a, float b, bool maximum) noexcept
+DRA2_ALWAYS_INLINE float vuMinMax(float a, float b, bool maximum) noexcept
 {
     int32_t l, r;
     std::memcpy(&l, &a, 4);
@@ -791,7 +801,7 @@ inline float vuMinMax(float a, float b, bool maximum) noexcept
     return res;
 }
 
-inline int32_t vuFloatToInt(float value, float scale) noexcept
+DRA2_ALWAYS_INLINE int32_t vuFloatToInt(float value, float scale) noexcept
 {
     const double scaled = static_cast<double>(value) * static_cast<double>(scale);
     if (scaled >= static_cast<double>(std::numeric_limits<int32_t>::max()))
@@ -846,10 +856,8 @@ inline void vuQueueFcset(VuClipPipe &cp, uint32_t &workingClip, uint32_t imm24) 
     cp.valid[slot] = 1;
 }
 
-inline void vuTickClip(VuClipPipe &cp, uint32_t &clip) noexcept
+DRA2_NOINLINE void vuTickClipSlow(VuClipPipe &cp, uint32_t &clip) noexcept
 {
-    if (!cp.pending)
-        return;
     if (cp.valid[cp.head])
     {
         clip = cp.val[cp.head];
@@ -859,10 +867,17 @@ inline void vuTickClip(VuClipPipe &cp, uint32_t &clip) noexcept
     cp.head = (cp.head + 1u) & 3u;
 }
 
+DRA2_ALWAYS_INLINE void vuTickClip(VuClipPipe &cp, uint32_t &clip) noexcept
+{
+    if (__builtin_expect(!cp.pending, 1))
+        return;
+    vuTickClipSlow(cp, clip);
+}
+
 inline void vuFlushClip(VuClipPipe &cp, uint32_t &clip) noexcept
 {
     while (cp.pending)
-        vuTickClip(cp, clip);
+        vuTickClipSlow(cp, clip);
 }
 
 struct VuQPipe
@@ -872,29 +887,29 @@ struct VuQPipe
     uint8_t delay = 0;
 };
 
-inline void vuQueueQ(VuQPipe &qp, float val, uint32_t di, uint8_t delay) noexcept
+DRA2_ALWAYS_INLINE void vuQueueQ(VuQPipe &qp, float val, uint32_t di, uint8_t delay) noexcept
 {
     qp.val = val;
     qp.di = di;
     qp.delay = delay;
 }
 
-inline void vuTickQ(VuQPipe &qp, float &q, uint32_t &status) noexcept
+DRA2_ALWAYS_INLINE void vuTickQ(VuQPipe &qp, float &q, uint32_t &status) noexcept
 {
-    if (qp.delay && --qp.delay == 0)
+    if (__builtin_expect(qp.delay != 0, 0) && --qp.delay == 0)
     {
         q = qp.val;
         status = (status & 0xFCFu) | qp.di | (qp.di << 6);
     }
 }
 
-inline void vuWaitQ(VuQPipe &qp, VuClipPipe &cp, uint32_t &clip, float &q, uint32_t &status) noexcept
+DRA2_ALWAYS_INLINE void vuWaitQ(VuQPipe &qp, VuClipPipe &cp, uint32_t &clip, float &q, uint32_t &status) noexcept
 {
-    if (qp.delay)
+    if (__builtin_expect(qp.delay != 0, 0))
     {
         uint8_t d = qp.delay;
         while (d-- && cp.pending)
-            vuTickClip(cp, clip);
+            vuTickClipSlow(cp, clip);
         q = qp.val;
         status = (status & 0xFCFu) | qp.di | (qp.di << 6);
         qp.delay = 0;
@@ -951,23 +966,25 @@ inline float vuRsqrt(float a, float b, uint32_t &outDi) noexcept
     return vuNormRes(res);
 }
 
-inline void vuXgkick(uint32_t qwordAddr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory,
-                     uint64_t *outGifHash, uint64_t *outGifBytes, bool replaySink)
+DRA2_NOINLINE void vuXgkick(uint32_t qwordAddr, uint8_t *vuData, uint32_t dataSize, GS &gs, PS2Memory *memory,
+                            uint64_t *outGifHash, uint64_t *outGifBytes, bool replaySink)
 {
     if (!vuData || dataSize < 16u)
         return;
     dbgstat::xgkick.fetch_add(1, std::memory_order_relaxed);
-    alignas(16) uint8_t packet[0x10000];
-    uint32_t src = (qwordAddr * 16u) % dataSize;
+    const bool pow2 = (dataSize & (dataSize - 1u)) == 0u;
+    const uint32_t mask = dataSize - 1u;
+    const uint32_t startOff = pow2 ? ((qwordAddr * 16u) & mask) : ((qwordAddr * 16u) % dataSize);
+
+    // Fast path: scan packet length directly in vuData without copying.
+    // Most XGKICK packets are contiguous (do not wrap around the 16 KiB VU1 data memory).
     uint32_t total = 0;
-    while (total + 16u <= sizeof(packet))
+    uint32_t cur = startOff;
+    bool wrapped = false;
+    while (total + 16u <= 0x10000u)
     {
-        uint64_t tagLo = 0, tagHi = 0;
-        std::memcpy(&tagLo, vuData + src, 8);
-        std::memcpy(&tagHi, vuData + src + 8, 8);
-        std::memcpy(packet + total, vuData + src, 16);
-        src = (src + 16u) % dataSize;
-        total += 16u;
+        uint64_t tagLo = 0;
+        std::memcpy(&tagLo, vuData + cur, 8);
         const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
         const bool eop = ((tagLo >> 15) & 1u) != 0u;
         const uint32_t flg = static_cast<uint32_t>((tagLo >> 58) & 3u);
@@ -977,29 +994,70 @@ inline void vuXgkick(uint32_t qwordAddr, uint8_t *vuData, uint32_t dataSize, GS 
         if (flg == 0u) dataQwords = nloop * nreg;
         else if (flg == 1u) dataQwords = (nloop * nreg + 1u) / 2u;
         else dataQwords = nloop;
-        for (uint32_t q = 0; q < dataQwords && total + 16u <= sizeof(packet); ++q)
+        const uint32_t chunkBytes = 16u + dataQwords * 16u;
+        const uint32_t maxRemain = 0x10000u - total;
+        const uint32_t takeBytes = (chunkBytes <= maxRemain) ? chunkBytes : (maxRemain & ~15u);
+        if (cur + takeBytes > dataSize)
         {
-            std::memcpy(packet + total, vuData + src, 16);
-            src = (src + 16u) % dataSize;
-            total += 16u;
+            wrapped = true;
+            break;
         }
-        if (eop)
+        total += takeBytes;
+        cur += takeBytes;
+        if (cur == dataSize)
+            cur = 0;
+        if (eop || chunkBytes > maxRemain)
             break;
     }
-    if (outGifHash && outGifBytes)
+
+    alignas(16) uint8_t wrapBuf[0x10000];
+    const uint8_t *emitPtr = vuData + startOff;
+    if (__builtin_expect(wrapped, 0))
+    {
+        uint32_t src = startOff;
+        total = 0;
+        while (total + 16u <= sizeof(wrapBuf))
+        {
+            uint64_t tagLo = 0;
+            std::memcpy(&tagLo, vuData + src, 8);
+            std::memcpy(wrapBuf + total, vuData + src, 16);
+            src = pow2 ? ((src + 16u) & mask) : ((src + 16u) % dataSize);
+            total += 16u;
+            const uint32_t nloop = static_cast<uint32_t>(tagLo & 0x7FFFu);
+            const bool eop = ((tagLo >> 15) & 1u) != 0u;
+            const uint32_t flg = static_cast<uint32_t>((tagLo >> 58) & 3u);
+            uint32_t nreg = static_cast<uint32_t>((tagLo >> 60) & 0xFu);
+            if (nreg == 0u) nreg = 16u;
+            uint32_t dataQwords = 0;
+            if (flg == 0u) dataQwords = nloop * nreg;
+            else if (flg == 1u) dataQwords = (nloop * nreg + 1u) / 2u;
+            else dataQwords = nloop;
+            for (uint32_t q = 0; q < dataQwords && total + 16u <= sizeof(wrapBuf); ++q)
+            {
+                std::memcpy(wrapBuf + total, vuData + src, 16);
+                src = pow2 ? ((src + 16u) & mask) : ((src + 16u) % dataSize);
+                total += 16u;
+            }
+            if (eop)
+                break;
+        }
+        emitPtr = wrapBuf;
+    }
+
+    if (__builtin_expect(outGifHash != nullptr && outGifBytes != nullptr, 0))
     {
         uint64_t h = *outGifHash;
         for (uint32_t i = 0; i < total; ++i)
-            h = (h ^ packet[i]) * 1099511628211ull;
+            h = (h ^ emitPtr[i]) * 1099511628211ull;
         *outGifHash = h;
         *outGifBytes += total;
     }
     if (replaySink)
         return;
     if (memory)
-        memory->submitGifPacket(GifPathId::Path1, packet, total);
+        memory->submitGifPacket(GifPathId::Path1, emitPtr, total);
     else
-        gs.processGIFPacket(packet, total);
+        gs.processGIFPacket(emitPtr, total);
 }
 '''
 
@@ -1024,18 +1082,13 @@ def main():
 static bool dra2Vu1NativeDispatch(uint64_t codeHash, VU1State &st, uint8_t *vuData, uint32_t dataSize,
                                   GS &gs, PS2Memory *memory, uint64_t *outGifHash, uint64_t *outGifBytes, bool replaySink)
 {
-    const int prevRound = std::fegetround();
-    const bool setRound = std::fesetround(FE_TOWARDZERO) == 0;
-    bool ok = false;
+    // VU1Interpreter::run() already sets FE_TOWARDZERO before invoking the native executor.
     switch (codeHash)
     {""")
     for h in progs:
-        parts.append(f"    case 0x{h:016x}ull: ok = vu1_prog_{h:016x}(st, vuData, dataSize, gs, memory, outGifHash, outGifBytes, replaySink); break;")
-    parts.append("""    default: break;
+        parts.append(f"    case 0x{h:016x}ull: return vu1_prog_{h:016x}(st, vuData, dataSize, gs, memory, outGifHash, outGifBytes, replaySink);")
+    parts.append("""    default: return false;
     }
-    if (setRound && prevRound != -1)
-        std::fesetround(prevRound);
-    return ok;
 }
 
 struct Vu1NativeAutoRegister {
