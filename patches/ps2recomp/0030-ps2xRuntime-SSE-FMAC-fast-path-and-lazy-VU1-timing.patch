@@ -1,0 +1,351 @@
+diff --git i/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp w/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 2661dc3..49a7b57 100644
+--- i/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ w/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -20,6 +20,10 @@
+ #include <cstring>
+ #include <filesystem>
+ #include <limits>
++#if defined(__SSE__)
++#include <xmmintrin.h>
++#include <pmmintrin.h>
++#endif
+ #include <ps2_log.h>
+ 
+ namespace
+@@ -1898,6 +1902,10 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+ 
+     const int previousRoundingMode = std::fegetround();
+     const bool useVuRounding = std::fesetround(FE_TOWARDZERO) == 0;
++#if defined(__SSE__)
++    const unsigned int prevMxcsr = _mm_getcsr();
++    _mm_setcsr(prevMxcsr | _MM_FLUSH_ZERO_ON | _MM_DENORMALS_ZERO_ON);
++#endif
+     const uint64_t budgetEnd = m_cycle + maxCycles;
+     bool programEnded = false;
+ 
+@@ -1934,6 +1942,209 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     if (hasAnyPending())
+         commitReadyPipelines();
+ 
++#if defined(__SSE__)
++    const auto storeMaskPs = [](float *dst, __m128 v, uint8_t dest) noexcept
++    {
++        if (dest == 0xFu)
++        {
++            _mm_storeu_ps(dst, v);
++            return;
++        }
++        alignas(16) float tmp[4];
++        _mm_store_ps(tmp, v);
++        if (dest & 0x8u) dst[0] = tmp[0];
++        if (dest & 0x4u) dst[1] = tmp[1];
++        if (dest & 0x2u) dst[2] = tmp[2];
++        if (dest & 0x1u) dst[3] = tmp[3];
++    };
++    const auto clampVuPs = [](__m128 v) noexcept -> __m128
++    {
++        const __m128 maxv = _mm_set1_ps(std::numeric_limits<float>::max());
++        const __m128 minv = _mm_set1_ps(-std::numeric_limits<float>::max());
++        return _mm_min_ps(_mm_max_ps(v, minv), maxv);
++    };
++    const auto execUpperFast = [&](uint32_t instr) noexcept -> bool
++    {
++        if (masks.programReadsFmacFlags)
++            return false;
++        const uint8_t op = static_cast<uint8_t>(instr & 0x3Fu);
++        if (op == 0x3Fu && ((instr >> 6) & 0x1Fu) == 0x0Bu)
++            return true; // NOP
++        const uint8_t dest = static_cast<uint8_t>((instr >> 21) & 0xFu);
++        const uint8_t ft = static_cast<uint8_t>((instr >> 16) & 0x1Fu);
++        const uint8_t fs = static_cast<uint8_t>((instr >> 11) & 0x1Fu);
++        const uint8_t fd = static_cast<uint8_t>((instr >> 6) & 0x1Fu);
++        if (op < 0x3Cu)
++        {
++            switch (op)
++            {
++            case 0x00: case 0x01: case 0x02: case 0x03: // ADDbc
++            {
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 bc = _mm_set1_ps(m_state.vf[ft][op & 3u]);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_add_ps(vs, bc)), dest);
++                return true;
++            }
++            case 0x04: case 0x05: case 0x06: case 0x07: // SUBbc
++            {
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 bc = _mm_set1_ps(m_state.vf[ft][op & 3u]);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_sub_ps(vs, bc)), dest);
++                return true;
++            }
++            case 0x08: case 0x09: case 0x0A: case 0x0B: // MADDbc
++            {
++                const __m128 acc = _mm_loadu_ps(m_state.acc);
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 bc = _mm_set1_ps(m_state.vf[ft][op & 3u]);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_add_ps(acc, _mm_mul_ps(vs, bc))), dest);
++                return true;
++            }
++            case 0x0C: case 0x0D: case 0x0E: case 0x0F: // MSUBbc
++            {
++                const __m128 acc = _mm_loadu_ps(m_state.acc);
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 bc = _mm_set1_ps(m_state.vf[ft][op & 3u]);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_sub_ps(acc, _mm_mul_ps(vs, bc))), dest);
++                return true;
++            }
++            case 0x18: case 0x19: case 0x1A: case 0x1B: // MULbc
++            {
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 bc = _mm_set1_ps(m_state.vf[ft][op & 3u]);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_mul_ps(vs, bc)), dest);
++                return true;
++            }
++            case 0x1C: // MULq
++            {
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 q = _mm_set1_ps(m_state.q);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_mul_ps(vs, q)), dest);
++                return true;
++            }
++            case 0x1E: // MULi
++            {
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 iv = _mm_set1_ps(m_state.i);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_mul_ps(vs, iv)), dest);
++                return true;
++            }
++            case 0x20: // ADDq
++            {
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 q = _mm_set1_ps(m_state.q);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_add_ps(vs, q)), dest);
++                return true;
++            }
++            case 0x22: // ADDi
++            {
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 iv = _mm_set1_ps(m_state.i);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_add_ps(vs, iv)), dest);
++                return true;
++            }
++            case 0x28: // ADD
++            {
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 vt = _mm_loadu_ps(m_state.vf[ft]);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_add_ps(vs, vt)), dest);
++                return true;
++            }
++            case 0x29: // MADD
++            {
++                const __m128 acc = _mm_loadu_ps(m_state.acc);
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 vt = _mm_loadu_ps(m_state.vf[ft]);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_add_ps(acc, _mm_mul_ps(vs, vt))), dest);
++                return true;
++            }
++            case 0x2A: // MUL
++            {
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 vt = _mm_loadu_ps(m_state.vf[ft]);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_mul_ps(vs, vt)), dest);
++                return true;
++            }
++            case 0x2C: // SUB
++            {
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 vt = _mm_loadu_ps(m_state.vf[ft]);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_sub_ps(vs, vt)), dest);
++                return true;
++            }
++            case 0x2D: // MSUB
++            {
++                const __m128 acc = _mm_loadu_ps(m_state.acc);
++                const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++                const __m128 vt = _mm_loadu_ps(m_state.vf[ft]);
++                storeMaskPs(m_state.vf[fd], clampVuPs(_mm_sub_ps(acc, _mm_mul_ps(vs, vt))), dest);
++                return true;
++            }
++            default:
++                return false;
++            }
++        }
++        const uint8_t special = static_cast<uint8_t>((instr & 3u) | ((instr >> 4) & 0x7Cu));
++        switch (special)
++        {
++        case 0x00: case 0x01: case 0x02: case 0x03: // ADDAbc
++        {
++            const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++            const __m128 bc = _mm_set1_ps(m_state.vf[ft][special & 3u]);
++            storeMaskPs(m_state.acc, clampVuPs(_mm_add_ps(vs, bc)), dest);
++            return true;
++        }
++        case 0x08: case 0x09: case 0x0A: case 0x0B: // MADDAbc
++        {
++            const __m128 acc = _mm_loadu_ps(m_state.acc);
++            const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++            const __m128 bc = _mm_set1_ps(m_state.vf[ft][special & 3u]);
++            storeMaskPs(m_state.acc, clampVuPs(_mm_add_ps(acc, _mm_mul_ps(vs, bc))), dest);
++            return true;
++        }
++        case 0x0C: case 0x0D: case 0x0E: case 0x0F: // MSUBAbc
++        {
++            const __m128 acc = _mm_loadu_ps(m_state.acc);
++            const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++            const __m128 bc = _mm_set1_ps(m_state.vf[ft][special & 3u]);
++            storeMaskPs(m_state.acc, clampVuPs(_mm_sub_ps(acc, _mm_mul_ps(vs, bc))), dest);
++            return true;
++        }
++        case 0x18: case 0x19: case 0x1A: case 0x1B: // MULAbc
++        {
++            const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++            const __m128 bc = _mm_set1_ps(m_state.vf[ft][special & 3u]);
++            storeMaskPs(m_state.acc, clampVuPs(_mm_mul_ps(vs, bc)), dest);
++            return true;
++        }
++        case 0x28: // ADDA
++        {
++            const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++            const __m128 vt = _mm_loadu_ps(m_state.vf[ft]);
++            storeMaskPs(m_state.acc, clampVuPs(_mm_add_ps(vs, vt)), dest);
++            return true;
++        }
++        case 0x29: // MADDA
++        {
++            const __m128 acc = _mm_loadu_ps(m_state.acc);
++            const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++            const __m128 vt = _mm_loadu_ps(m_state.vf[ft]);
++            storeMaskPs(m_state.acc, clampVuPs(_mm_add_ps(acc, _mm_mul_ps(vs, vt))), dest);
++            return true;
++        }
++        case 0x2A: // MULA
++        {
++            const __m128 vs = _mm_loadu_ps(m_state.vf[fs]);
++            const __m128 vt = _mm_loadu_ps(m_state.vf[ft]);
++            storeMaskPs(m_state.acc, clampVuPs(_mm_mul_ps(vs, vt)), dest);
++            return true;
++        }
++        default:
++            return false;
++        }
++    };
++#endif
++
+     DecodedInstructionPair fallbackDecoded{};
+     while (m_cycle < budgetEnd && !m_stopRequested)
+     {
+@@ -1950,27 +2161,35 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+             break;
+         }
+ 
+-        uint64_t readyCycle = calculatePairReadyCycle(decoded);
+-        while (readyCycle > m_cycle)
++        const bool trackTiming = m_xgkick.active || hasAnyPending() ||
++                                 decoded.lowerUsage.waitQ || decoded.lowerUsage.waitP ||
++                                 decoded.lowerUsage.pipeline == PipelineFdiv ||
++                                 decoded.lowerUsage.pipeline == PipelineEfu ||
++                                 decoded.lowerUsage.pipeline == PipelineXgkick;
++        if (trackTiming)
+         {
+-            if (readyCycle >= budgetEnd)
++            uint64_t readyCycle = calculatePairReadyCycle(decoded);
++            while (readyCycle > m_cycle)
+             {
+-                advanceTo(budgetEnd);
++                if (readyCycle >= budgetEnd)
++                {
++                    advanceTo(budgetEnd);
++                    break;
++                }
++                if (!m_xgkick.active && !hasAnyPending())
++                {
++                    m_cycle = readyCycle;
++                    m_state.cycles = m_cycle;
++                }
++                else
++                {
++                    advanceTo(readyCycle);
++                }
++                readyCycle = calculatePairReadyCycle(decoded);
++            }
++            if (m_cycle >= budgetEnd)
+                 break;
+-            }
+-            if (!m_xgkick.active && !hasAnyPending())
+-            {
+-                m_cycle = readyCycle;
+-                m_state.cycles = m_cycle;
+-            }
+-            else
+-            {
+-                advanceTo(readyCycle);
+-            }
+-            readyCycle = calculatePairReadyCycle(decoded);
+         }
+-        if (m_cycle >= budgetEnd)
+-            break;
+ 
+         uint8_t writtenVi = 0u;
+         int32_t oldVi = 0;
+@@ -1982,10 +2201,19 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         }
+ 
+         const bool upperIsNop = (decoded.upper & 0x7FFu) == 0x2FFu;
++        const auto runUpper = [&]()
++        {
++            if (upperIsNop)
++                return;
++#if defined(__SSE__)
++            if (execUpperFast(decoded.upper))
++                return;
++#endif
++            execUpper(decoded.upper);
++        };
+         if (decoded.iBit)
+         {
+-            if (!upperIsNop)
+-                execUpper(decoded.upper);
++            runUpper();
+             float immediate = 0.0f;
+             std::memcpy(&immediate, &decoded.lower, sizeof(immediate));
+             m_state.i = immediate;
+@@ -1997,8 +2225,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+             std::memcpy(oldVf,
+                         m_state.vf[decoded.upperVfShadowReg],
+                         sizeof(oldVf));
+-            if (!upperIsNop)
+-                execUpper(decoded.upper);
++            runUpper();
+             std::memcpy(upperVf,
+                         m_state.vf[decoded.upperVfShadowReg],
+                         sizeof(upperVf));
+@@ -2012,8 +2239,7 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         }
+         else
+         {
+-            if (!upperIsNop)
+-                execUpper(decoded.upper);
++            runUpper();
+             if (decoded.lower != 0x8000033Cu)
+                 execLower(decoded.lower, vuData, dataSize, gs, memory, decoded.upper);
+         }
+@@ -2023,7 +2249,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+         if (writtenVi != 0u)
+             m_state.vi[writtenVi] = static_cast<int16_t>(m_state.vi[writtenVi]);
+ 
+-        markPairWrites(decoded);
++        if (trackTiming || m_xgkick.active || hasAnyPending())
++            markPairWrites(decoded);
+         if (writtenVi != 0u && decoded.lowerUsage.delaysNextBranchRead)
+             recordViWriteForBranch(writtenVi, oldVi);
+ 
+@@ -2118,6 +2345,9 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     }
+     if (useVuRounding && previousRoundingMode != -1)
+         std::fesetround(previousRoundingMode);
++#if defined(__SSE__)
++    _mm_setcsr(prevMxcsr);
++#endif
+ }
+ 
+ int VU1Interpreter::replayCapture(const char *path)
