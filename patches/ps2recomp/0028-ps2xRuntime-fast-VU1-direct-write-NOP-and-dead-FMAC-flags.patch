@@ -1,0 +1,297 @@
+diff --git i/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp w/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index bf34345..2c12ee4 100644
+--- i/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ w/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -37,6 +37,7 @@ namespace
+         uint32_t vfWrite = 0;
+         uint32_t viWrite = 0;
+         uint32_t accWrite = 0;
++        bool programReadsFmacFlags = true;
+     };
+ 
+     Vu1ActiveMasks &activeMasksFor(const VU1Interpreter *self) noexcept
+@@ -119,7 +120,9 @@ void VU1Interpreter::resetScheduler()
+     m_viWritePipeline = {};
+     m_accWritePipeline = {};
+     auto &masks = activeMasksFor(this);
++    const bool keepFmacFlags = masks.programReadsFmacFlags;
+     masks = {};
++    masks.programReadsFmacFlags = keepFmacFlags;
+     m_xgkick.sourceAddress = 0;
+     m_xgkick.totalBytes = 0;
+     m_xgkick.copiedBytes = 0;
+@@ -616,6 +619,29 @@ void VU1Interpreter::updateFmacFlags(const uint8_t laneFlags[4], uint8_t dest,
+ 
+ void VU1Interpreter::applyFmacDest(float *dst, float *result, uint8_t dest)
+ {
++    if (!activeMasksFor(this).programReadsFmacFlags)
++    {
++        for (uint32_t c = 0; c < 4u; ++c)
++        {
++            if ((dest & laneForComponent(c)) == 0u)
++                continue;
++            uint32_t bits = 0;
++            std::memcpy(&bits, &result[c], sizeof(bits));
++            const uint32_t exp = (bits >> 23) & 0xFFu;
++            if (exp == 0u)
++            {
++                bits &= 0x80000000u;
++                std::memcpy(&result[c], &bits, sizeof(bits));
++            }
++            else if (exp == 0xFFu)
++            {
++                bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
++                std::memcpy(&result[c], &bits, sizeof(bits));
++            }
++        }
++        applyDest(dst, result, dest);
++        return;
++    }
+     uint8_t laneFlags[4]{};
+     normalizeFmacResult(result, dest, laneFlags);
+     updateFmacFlags(laneFlags, dest, calculateFmacProductSticky(dest));
+@@ -624,6 +650,29 @@ void VU1Interpreter::applyFmacDest(float *dst, float *result, uint8_t dest)
+ 
+ void VU1Interpreter::applyFmacDestAcc(float *result, uint8_t dest)
+ {
++    if (!activeMasksFor(this).programReadsFmacFlags)
++    {
++        for (uint32_t c = 0; c < 4u; ++c)
++        {
++            if ((dest & laneForComponent(c)) == 0u)
++                continue;
++            uint32_t bits = 0;
++            std::memcpy(&bits, &result[c], sizeof(bits));
++            const uint32_t exp = (bits >> 23) & 0xFFu;
++            if (exp == 0u)
++            {
++                bits &= 0x80000000u;
++                std::memcpy(&result[c], &bits, sizeof(bits));
++            }
++            else if (exp == 0xFFu)
++            {
++                bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
++                std::memcpy(&result[c], &bits, sizeof(bits));
++            }
++        }
++        applyDestAcc(result, dest);
++        return;
++    }
+     uint8_t laneFlags[4]{};
+     normalizeFmacResult(result, dest, laneFlags);
+     updateFmacFlags(laneFlags, dest, calculateFmacProductSticky(dest));
+@@ -738,6 +787,24 @@ void VU1Interpreter::queueP(float value, uint32_t latency)
+ 
+ void VU1Interpreter::queueStore(uint32_t address, const uint32_t words[4], uint8_t laneMask)
+ {
++    if (!m_xgkick.active && m_activeVuData && address + 16u <= m_activeVuDataSize)
++    {
++        if (laneMask == 0xFu)
++        {
++            std::memcpy(m_activeVuData + address, words, 16u);
++        }
++        else
++        {
++            uint32_t oldWords[4]{};
++            std::memcpy(oldWords, m_activeVuData + address, sizeof(oldWords));
++            if (laneMask & 0x8u) oldWords[0] = words[0];
++            if (laneMask & 0x4u) oldWords[1] = words[1];
++            if (laneMask & 0x2u) oldWords[2] = words[2];
++            if (laneMask & 0x1u) oldWords[3] = words[3];
++            std::memcpy(m_activeVuData + address, oldWords, sizeof(oldWords));
++        }
++        return;
++    }
+     const uint32_t freeMask = (~activeMasksFor(this).store) & ((1u << kMaxPendingStores) - 1u);
+     if (freeMask)
+     {
+@@ -1104,6 +1171,17 @@ void VU1Interpreter::advanceOneCycle()
+ 
+ void VU1Interpreter::advanceTo(uint64_t targetCycle)
+ {
++    if (!m_xgkick.active && !m_fdiv.valid &&
++        (activeMasksFor(this).flag | activeMasksFor(this).efu | activeMasksFor(this).store |
++         activeMasksFor(this).vfWrite | activeMasksFor(this).viWrite | activeMasksFor(this).accWrite) == 0u)
++    {
++        if (targetCycle > m_cycle)
++        {
++            m_cycle = targetCycle;
++            m_state.cycles = m_cycle;
++        }
++        return;
++    }
+     while (m_cycle < targetCycle)
+         advanceOneCycle();
+ }
+@@ -1685,8 +1763,22 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
+                                              const PS2Memory *memory, uint64_t generation)
+ {
+     const uint32_t pairCount = std::min<uint32_t>(codeSize / 8u, kMaxDecodedPairs);
++    bool readsFmacFlags = false;
+     for (uint32_t i = 0; i < pairCount; ++i)
+-        m_decodedCodeCache[i] = decodeInstructionPair(vuCode, i * 8u);
++    {
++        const DecodedInstructionPair pair = decodeInstructionPair(vuCode, i * 8u);
++        m_decodedCodeCache[i] = pair;
++        if (!pair.iBit)
++        {
++            const uint32_t top = (pair.lower >> 25) & 0x7Fu;
++            if (top == 0x14u || top == 0x16u || top == 0x17u ||
++                top == 0x18u || top == 0x1Au || top == 0x1Bu || top == 0x1Du)
++            {
++                readsFmacFlags = true;
++            }
++        }
++    }
++    activeMasksFor(this).programReadsFmacFlags = readsFmacFlags;
+ 
+     m_cachedVuCode = vuCode;
+     m_cachedMemory = memory;
+@@ -1871,24 +1963,6 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+             oldVi = m_state.vi[writtenVi];
+         }
+ 
+-        const VfAccess upperWrite = decoded.upperUsage.vfWrite;
+-        const VfAccess lowerWrite = decoded.lowerUsage.vfWrite;
+-        const bool hasUpperWrite = upperWrite.reg != 0u;
+-        const bool hasLowerWrite = lowerWrite.reg != 0u && decoded.suppressedLowerVf != lowerWrite.reg;
+-        const bool hasDistinctLowerWrite = hasLowerWrite && (!hasUpperWrite || lowerWrite.reg != upperWrite.reg);
+-        float oldUpperVf[4]{};
+-        float newUpperVf[4]{};
+-        float oldLowerVf[4]{};
+-        float newLowerVf[4]{};
+-        float oldAcc[4]{};
+-        float newAcc[4]{};
+-        if (hasUpperWrite)
+-            std::memcpy(oldUpperVf, m_state.vf[upperWrite.reg], sizeof(oldUpperVf));
+-        if (hasDistinctLowerWrite)
+-            std::memcpy(oldLowerVf, m_state.vf[lowerWrite.reg], sizeof(oldLowerVf));
+-        if (decoded.upperUsage.accWrite != 0u)
+-            std::memcpy(oldAcc, m_state.acc, sizeof(oldAcc));
+-
+         if (decoded.iBit)
+         {
+             execUpper(decoded.upper);
+@@ -1923,44 +1997,8 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+ 
+         m_viBranchBackupValid = false;
+ 
+-        if (hasUpperWrite)
+-        {
+-            std::memcpy(newUpperVf, m_state.vf[upperWrite.reg], sizeof(newUpperVf));
+-            std::memcpy(m_state.vf[upperWrite.reg], oldUpperVf, sizeof(oldUpperVf));
+-            const uint32_t latency =
+-                decoded.upperUsage.vfLatency != 0u
+-                    ? decoded.upperUsage.vfLatency
+-                    : decoded.upperUsage.latency;
+-            queueVfWrite(upperWrite.reg, upperWrite.lanes, newUpperVf, latency);
+-        }
+-        if (hasDistinctLowerWrite)
+-        {
+-            std::memcpy(newLowerVf, m_state.vf[lowerWrite.reg], sizeof(newLowerVf));
+-            std::memcpy(m_state.vf[lowerWrite.reg], oldLowerVf, sizeof(oldLowerVf));
+-            const uint32_t latency = decoded.lowerUsage.vfLatency != 0u
+-                                         ? decoded.lowerUsage.vfLatency
+-                                         : decoded.lowerUsage.latency;
+-            queueVfWrite(lowerWrite.reg, lowerWrite.lanes, newLowerVf, latency);
+-        }
+-        if (decoded.upperUsage.accWrite != 0u)
+-        {
+-            std::memcpy(newAcc, m_state.acc, sizeof(newAcc));
+-            std::memcpy(m_state.acc, oldAcc, sizeof(oldAcc));
+-            // ACC is forwarded to the next upper instruction. Its arithmetic
+-            // flags still use the normal four-cycle FMAC timeline.
+-            queueAccWrite(decoded.upperUsage.accWrite, newAcc,
+-                          kAccForwardLatency);
+-        }
+         if (writtenVi != 0u)
+-        {
+-            const int32_t newVi = m_state.vi[writtenVi];
+-            m_state.vi[writtenVi] = oldVi;
+-            const uint32_t latency =
+-                decoded.lowerUsage.viLatency != 0u
+-                    ? decoded.lowerUsage.viLatency
+-                    : decoded.lowerUsage.latency;
+-            queueViWrite(writtenVi, newVi, latency);
+-        }
++            m_state.vi[writtenVi] = static_cast<int16_t>(m_state.vi[writtenVi]);
+ 
+         markPairWrites(decoded);
+         if (writtenVi != 0u && decoded.lowerUsage.delaysNextBranchRead)
+diff --git i/ps2xRuntime/src/lib/vu/ps2_vu1_upper.cpp w/ps2xRuntime/src/lib/vu/ps2_vu1_upper.cpp
+index 16d7ab4..11172f1 100644
+--- i/ps2xRuntime/src/lib/vu/ps2_vu1_upper.cpp
++++ w/ps2xRuntime/src/lib/vu/ps2_vu1_upper.cpp
+@@ -31,6 +31,20 @@ namespace
+             return std::numeric_limits<int32_t>::min();
+         return static_cast<int32_t>(scaled);
+     }
++    inline float fastNormalizeOperand(float value) noexcept
++    {
++        uint32_t bits = 0;
++        std::memcpy(&bits, &value, sizeof(bits));
++        const uint32_t exp = (bits >> 23) & 0xFFu;
++        if (exp >= 1u && exp <= 254u)
++            return value;
++        if (exp == 0u)
++            bits &= 0x80000000u;
++        else
++            bits = (bits & 0x80000000u) | 0x7F7FFFFFu;
++        std::memcpy(&value, &bits, sizeof(value));
++        return value;
++    }
+ }
+ 
+ // ============================================================================
+@@ -38,12 +52,15 @@ namespace
+ // ============================================================================
+ void VU1Interpreter::execUpper(uint32_t instr)
+ {
++    uint8_t op = instr & 0x3F;
++    if (op == 0x3Fu && ((instr >> 6) & 0x1Fu) == 0x0Bu)
++        return; // NOP (special 0x2F)
++
+     m_currentUpperInstruction = instr;
+     uint8_t dest = DEST(instr);
+     uint8_t ft = FT(instr);
+     uint8_t fs = FS(instr);
+     uint8_t fd = FD(instr);
+-    uint8_t op = instr & 0x3F;
+ 
+     float *vd = m_state.vf[fd];
+     const bool minMax = (op >= 0x10u && op <= 0x17u) ||
+@@ -51,17 +68,28 @@ void VU1Interpreter::execUpper(uint32_t instr)
+     float normalizedVs[4];
+     float normalizedVt[4];
+     float normalizedAcc[4];
+-    for (uint32_t component = 0; component < 4u; ++component)
++    if (minMax)
+     {
+-        normalizedVs[component] = minMax ? m_state.vf[fs][component] : normalizeOperand(m_state.vf[fs][component]);
+-        normalizedVt[component] = minMax ? m_state.vf[ft][component] : normalizeOperand(m_state.vf[ft][component]);
+-        normalizedAcc[component] = normalizeOperand(m_state.acc[component]);
++        for (uint32_t component = 0; component < 4u; ++component)
++        {
++            normalizedVs[component] = m_state.vf[fs][component];
++            normalizedVt[component] = m_state.vf[ft][component];
++        }
++    }
++    else
++    {
++        for (uint32_t component = 0; component < 4u; ++component)
++        {
++            normalizedVs[component] = fastNormalizeOperand(m_state.vf[fs][component]);
++            normalizedVt[component] = fastNormalizeOperand(m_state.vf[ft][component]);
++            normalizedAcc[component] = fastNormalizeOperand(m_state.acc[component]);
++        }
+     }
+     const float *vs = normalizedVs;
+     const float *vt = normalizedVt;
+     const float *acc = normalizedAcc;
+-    const float q = normalizeOperand(m_state.q);
+-    const float i = minMax ? m_state.i : normalizeOperand(m_state.i);
++    const float q = fastNormalizeOperand(m_state.q);
++    const float i = minMax ? m_state.i : fastNormalizeOperand(m_state.i);
+     float result[4];
+ 
+     // Upper opcode decoding (bits 5:0 of upper word)
