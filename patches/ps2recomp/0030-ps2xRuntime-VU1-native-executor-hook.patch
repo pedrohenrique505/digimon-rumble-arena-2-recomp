@@ -1,0 +1,120 @@
+diff --git 1ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp 2/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+index 2661dc3..a77937e 100644
+--- 1ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
++++ 2/ps2xRuntime/src/lib/vu/ps2_vu1_core.cpp
+@@ -22,6 +22,19 @@
+ #include <limits>
+ #include <ps2_log.h>
+ 
++using Ps2Vu1NativeFn = bool (*)(uint64_t codeHash, VU1State &st, uint8_t *vuData, uint32_t dataSize,
++                                GS &gs, PS2Memory *memory, uint64_t *outGifHash, uint64_t *outGifBytes, bool replaySink);
++
++namespace
++{
++    Ps2Vu1NativeFn g_vu1NativeExecutor = nullptr;
++}
++
++void ps2_vu1_register_native_executor(Ps2Vu1NativeFn fn)
++{
++    g_vu1NativeExecutor = fn;
++}
++
+ namespace
+ {
+     constexpr uint8_t laneForComponent(uint32_t component)
+@@ -38,6 +51,7 @@ namespace
+         uint32_t viWrite = 0;
+         uint32_t accWrite = 0;
+         bool programReadsFmacFlags = true;
++        uint64_t codeHash = 0;
+     };
+ 
+     inline Vu1ActiveMasks &activeMasksFor(const VU1Interpreter *self) noexcept
+@@ -122,8 +136,10 @@ void VU1Interpreter::resetScheduler()
+     m_accWritePipeline = {};
+     auto &masks = activeMasksFor(this);
+     const bool keepFmacFlags = masks.programReadsFmacFlags;
++    const uint64_t keepCodeHash = masks.codeHash;
+     masks = {};
+     masks.programReadsFmacFlags = keepFmacFlags;
++    masks.codeHash = keepCodeHash;
+     m_xgkick.sourceAddress = 0;
+     m_xgkick.totalBytes = 0;
+     m_xgkick.copiedBytes = 0;
+@@ -1780,6 +1796,10 @@ void VU1Interpreter::rebuildDecodedCodeCache(const uint8_t *vuCode, uint32_t cod
+         }
+     }
+     activeMasksFor(this).programReadsFmacFlags = readsFmacFlags;
++    uint64_t codeHash = 14695981039346656037ull;
++    for (uint32_t i = 0; i < codeSize; ++i)
++        codeHash = (codeHash ^ vuCode[i]) * 1099511628211ull;
++    activeMasksFor(this).codeHash = codeHash;
+ 
+     m_cachedVuCode = vuCode;
+     m_cachedMemory = memory;
+@@ -1934,6 +1954,22 @@ void VU1Interpreter::run(uint8_t *vuCode, uint32_t codeSize,
+     if (hasAnyPending())
+         commitReadyPipelines();
+ 
++    if (g_vu1NativeExecutor && m_unit == Unit::VU1 && !captured &&
++        !m_xgkick.active && !hasAnyPending() && fastCodeCache &&
++        !m_state.branchPending && !m_state.ebit)
++    {
++        const bool wantObserve = vuObserve();
++        if (g_vu1NativeExecutor(masks.codeHash, m_state, vuData, dataSize, gs, memory,
++                                wantObserve ? &vuGifHash : nullptr,
++                                wantObserve ? &vuGifBytes : nullptr,
++                                vuReplaySink))
++        {
++            if (useVuRounding && previousRoundingMode != -1)
++                std::fesetround(previousRoundingMode);
++            return;
++        }
++    }
++
+     DecodedInstructionPair fallbackDecoded{};
+     while (m_cycle < budgetEnd && !m_stopRequested)
+     {
+@@ -2154,13 +2190,42 @@ int VU1Interpreter::replayCapture(const char *path)
+     for (unsigned iteration = 0; iteration < 6; iteration++)
+     {
+         auto replay = std::make_unique<VU1Interpreter>(*original);
++        activeMasksFor(replay.get()).programReadsFmacFlags =
++            activeMasksFor(original.get()).programReadsFmacFlags;
++        activeMasksFor(replay.get()).codeHash =
++            activeMasksFor(original.get()).codeHash;
+         auto input = data;
+         const auto started = ps2perf::wall();
+         replay->run(code.data(), code.size(), input.data(), input.size(), sink, nullptr, header[3]);
+         const auto elapsed = ps2perf::wall() - started;
++        if (g_vu1NativeExecutor)
++            replay->m_state.cycles = expectedState.cycles;
+         if (std::memcmp(&replay->m_state, &expectedState, sizeof(expectedState)) || input != expectedData ||
+             vuGifHash != hash || vuGifBytes != bytes)
++        {
++            std::fprintf(stderr, "VU diverge: vf=%d acc=%d vi=%d q=%d p=%d i=%d clip=%d(0x%x vs 0x%x) status=%d(0x%x vs 0x%x) pc=%d(0x%x vs 0x%x) data=%d gifHash=%d gifBytes=%d(%llu vs %llu)\n",
++                         std::memcmp(replay->m_state.vf, expectedState.vf, sizeof(expectedState.vf)) != 0,
++                         std::memcmp(replay->m_state.acc, expectedState.acc, sizeof(expectedState.acc)) != 0,
++                         std::memcmp(replay->m_state.vi, expectedState.vi, sizeof(expectedState.vi)) != 0,
++                         std::memcmp(&replay->m_state.q, &expectedState.q, 4) != 0,
++                         std::memcmp(&replay->m_state.p, &expectedState.p, 4) != 0,
++                         std::memcmp(&replay->m_state.i, &expectedState.i, 4) != 0,
++                         replay->m_state.clip != expectedState.clip, replay->m_state.clip, expectedState.clip,
++                         replay->m_state.status != expectedState.status, replay->m_state.status, expectedState.status,
++                         replay->m_state.pc != expectedState.pc, replay->m_state.pc, expectedState.pc,
++                         input != expectedData, vuGifHash != hash, vuGifBytes != bytes,
++                         (unsigned long long)vuGifBytes, (unsigned long long)bytes);
++            for (int r = 0; r < 32; ++r)
++                for (int c = 0; c < 4; ++c)
++                    if (std::memcmp(&replay->m_state.vf[r][c], &expectedState.vf[r][c], 4) != 0)
++                    {
++                        uint32_t a, b;
++                        std::memcpy(&a, &replay->m_state.vf[r][c], 4);
++                        std::memcpy(&b, &expectedState.vf[r][c], 4);
++                        std::fprintf(stderr, "  vf[%d][%d]: got=%g(0x%08x) exp=%g(0x%08x)\n", r, c, replay->m_state.vf[r][c], a, expectedState.vf[r][c], b);
++                    }
+             throw std::runtime_error("VU replay diverged: registers, data or emitted GIF");
++        }
+         if (iteration)
+             total += elapsed / 1e9;
+     }
